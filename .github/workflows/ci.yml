@@ -67,7 +67,7 @@ jobs:
           mkdir -p /tmp/digests
           digest="${{ steps.build.outputs.digest }}"
           touch "/tmp/digests/${digest#sha256:}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: digests-${{ matrix.arch }}
           path: /tmp/digests/*
@@ -87,7 +87,7 @@ jobs:
           chmod 0755 "/tmp/release/${pkg}/anisette-server" "/tmp/release/${pkg}/import_apk" "/tmp/release/${pkg}/import_itunes"
           cp LICENSE THIRD_PARTY_NOTICES.md README.md "/tmp/release/${pkg}/"
           tar -C /tmp/release -czf "/tmp/release-out/${pkg}.tar.gz" "${pkg}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: startsWith(github.ref, 'refs/tags/v')
         with:
           name: release-${{ matrix.arch }}
@@ -105,7 +105,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         if: startsWith(github.ref, 'refs/tags/v')
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: /tmp/digests
           pattern: digests-*
@@ -132,7 +132,7 @@ jobs:
           docker buildx imagetools create \
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< '${{ steps.meta.outputs.json }}') \
             $(printf 'ghcr.io/${{ github.repository }}@sha256:%s ' *)
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         if: startsWith(github.ref, 'refs/tags/v')
         with:
           path: /tmp/release-assets
