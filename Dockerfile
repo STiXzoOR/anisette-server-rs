@@ -1,4 +1,4 @@
-FROM rust:1.95.0-bookworm AS chef
+FROM rust:1.99.1-bookworm AS chef
 RUN apt-get update && apt-get install -y --no-install-recommends cmake clang libclang-dev ninja-build \
     && rm -rf /var/lib/apt/lists/*
 RUN cargo install cargo-chef --version 0.1.78 --locked
