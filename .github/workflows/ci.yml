@@ -73,15 +73,38 @@ jobs:
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
+      - name: Package release binaries
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          TAG: ${{ github.ref_name }}
+          TARGET: ${{ matrix.arch == 'amd64' && 'x86_64-unknown-linux-gnu' || 'aarch64-unknown-linux-gnu' }}
+        run: |
+          pkg="anisette-server-${TAG}-${TARGET}"
+          mkdir -p "/tmp/release/${pkg}" /tmp/release-out
+          docker buildx build --target binaries --platform "${{ matrix.platform }}" \
+            --cache-from "type=gha,scope=image-${{ matrix.arch }}" \
+            --output "type=local,dest=/tmp/release/${pkg}" .
+          chmod 0755 "/tmp/release/${pkg}/anisette-server" "/tmp/release/${pkg}/import_apk" "/tmp/release/${pkg}/import_itunes"
+          cp LICENSE THIRD_PARTY_NOTICES.md README.md "/tmp/release/${pkg}/"
+          tar -C /tmp/release -czf "/tmp/release-out/${pkg}.tar.gz" "${pkg}"
+      - uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          name: release-${{ matrix.arch }}
+          path: /tmp/release-out/*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
 
   publish:
     needs: image
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
     steps:
+      - uses: actions/checkout@v7
+        if: startsWith(github.ref, 'refs/tags/v')
       - uses: actions/download-artifact@v4
         with:
           path: /tmp/digests
@@ -109,3 +132,56 @@ jobs:
           docker buildx imagetools create \
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< '${{ steps.meta.outputs.json }}') \
             $(printf 'ghcr.io/${{ github.repository }}@sha256:%s ' *)
+      - uses: actions/download-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          path: /tmp/release-assets
+          pattern: release-*
+          merge-multiple: true
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        working-directory: /tmp/release-assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          image="ghcr.io/${REPO,,}:${version}"
+          sha256sum *.tar.gz > SHA256SUMS
+          cat <<EOF > /tmp/release-notes.md
+          ### Container image (GHCR)
+
+          Multi-architecture image (\`linux/amd64\` and \`linux/arm64\`) bundling all three verified Apple ADI backends:
+
+          \`\`\`sh
+          # Android ADI backend (default)
+          docker run --rm -p 127.0.0.1:6969:6969 \\
+            --mount type=volume,src=anisette-android-data,dst=/data \\
+            ${image} --backend android
+
+          # macOS adid backend
+          docker run --rm -p 127.0.0.1:6969:6969 \\
+            --mount type=volume,src=anisette-macos-data,dst=/data \\
+            ${image} --backend macos
+
+          # Windows CoreADI backend
+          docker run --rm -p 127.0.0.1:6969:6969 \\
+            --mount type=volume,src=anisette-windows-data,dst=/data \\
+            ${image} --backend windows
+          \`\`\`
+
+          ### Precompiled Linux binaries
+
+          The attached \`.tar.gz\` archives contain \`anisette-server\`, \`import_apk\`, and \`import_itunes\` for \`x86_64-unknown-linux-gnu\` and \`aarch64-unknown-linux-gnu\` (no proprietary Apple binaries are included in release archives; see \`assets/README.md\` for local preparation).
+          EOF
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" *.tar.gz SHA256SUMS --clobber --repo "$REPO"
+            gh release edit "$TAG" --notes-file /tmp/release-notes.md --repo "$REPO"
+          else
+            gh release create "$TAG" *.tar.gz SHA256SUMS \
+              --repo "$REPO" \
+              --title "$TAG" \
+              --notes-file /tmp/release-notes.md \
+              --generate-notes
+          fi

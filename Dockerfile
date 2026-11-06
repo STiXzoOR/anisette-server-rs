@@ -46,6 +46,11 @@ RUN curl --disable --fail --location --proto '=https' --proto-redir '=https' \
       | sha256sum --check \
     && chmod 0644 /assets/CoreADI-26.x86_64
 
+FROM scratch AS binaries
+COPY --from=build /src/target/release/anisette-server /anisette-server
+COPY --from=build /src/target/release/examples/import_apk /import_apk
+COPY --from=build /src/target/release/examples/import_itunes /import_itunes
+
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \

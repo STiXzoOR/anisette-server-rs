@@ -8,15 +8,15 @@ The table was generated from `cargo metadata --locked --filter-platform TARGET -
 
 Container base packages retain their own package licenses and are outside this Cargo table. Curl is used only by the image build to download assets. Apple binaries remain proprietary; bundling them grants no redistribution rights. Source provenance and retained notices are recorded in [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
 
-Cargo.lock SHA-256: `af2a4f70831a37b4e0499183291d7531fa627cfd60a1dbccdf4e74debd5969df`.
+Cargo.lock SHA-256: `0ba4c8fb5c0a23b12c1dda362b136a8f61a8c90b2b4c405db028667b575091f1`.
 
 | Package | Version | Declared SPDX | Normal dependency targets |
 | --- | --- | --- | --- |
-| adi-android | 0.1.1 | GPL-2.0-only | Linux AMD64, Linux ARM64, macOS ARM64, Windows x64 |
-| adi-macos | 0.1.1 | GPL-2.0-only | Linux AMD64, Linux ARM64, macOS ARM64, Windows x64 |
-| adi-windows | 0.1.1 | GPL-2.0-only | Linux AMD64, Linux ARM64, macOS ARM64, Windows x64 |
-| anisette | 0.1.1 | GPL-2.0-only | Linux AMD64, Linux ARM64, macOS ARM64, Windows x64 |
-| anisette-server | 0.1.1 | GPL-2.0-only | Linux AMD64, Linux ARM64, macOS ARM64, Windows x64 |
+| adi-android | 0.1.2 | GPL-2.0-only | Linux AMD64, Linux ARM64, macOS ARM64, Windows x64 |
+| adi-macos | 0.1.2 | GPL-2.0-only | Linux AMD64, Linux ARM64, macOS ARM64, Windows x64 |
+| adi-windows | 0.1.2 | GPL-2.0-only | Linux AMD64, Linux ARM64, macOS ARM64, Windows x64 |
+| anisette | 0.1.2 | GPL-2.0-only | Linux AMD64, Linux ARM64, macOS ARM64, Windows x64 |
+| anisette-server | 0.1.2 | GPL-2.0-only | Linux AMD64, Linux ARM64, macOS ARM64, Windows x64 |
 | anstream | 1.0.0 | MIT OR Apache-2.0 | Linux AMD64, Linux ARM64, macOS ARM64, Windows x64 |
 | anstyle | 1.0.14 | MIT OR Apache-2.0 | Linux AMD64, Linux ARM64, macOS ARM64, Windows x64 |
 | anstyle-parse | 1.0.0 | MIT OR Apache-2.0 | Linux AMD64, Linux ARM64, macOS ARM64, Windows x64 |
