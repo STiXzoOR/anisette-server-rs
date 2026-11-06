@@ -4,7 +4,7 @@ Use this guide to build, lint, test, and verify the workspace. For local prerequ
 
 ## Prerequisites
 
-- Rust `1.95.0` (pinned in `rust-toolchain.toml`)
+- Rust `1.99.1` (pinned in `rust-toolchain.toml`)
 - CMake, Ninja (`ninja-build`), a C/C++ compiler, and `libclang` (required to compile `unicorn-engine-sys`)
 - `7z` (`p7zip-full`) when extracting the Windows `CoreADI.dll` from the iTunes installer locally
 
