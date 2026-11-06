@@ -3,20 +3,14 @@ mod http;
 #[cfg(test)]
 mod live_tests;
 mod store;
-use clap::{Parser, ValueEnum};
+use backend::Backend;
+use clap::Parser;
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     process::ExitCode,
     sync::Arc,
 };
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-enum Backend {
-    Android,
-    Macos,
-    Windows,
-}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -40,13 +34,9 @@ struct Args {
 
 impl Args {
     fn binary_path(&self) -> &Path {
-        self.binary.as_deref().unwrap_or_else(|| {
-            Path::new(match self.backend {
-                Backend::Android => "/assets",
-                Backend::Macos => "/assets/CoreADI-26.x86_64",
-                Backend::Windows => "/assets/CoreADI.dll",
-            })
-        })
+        self.binary
+            .as_deref()
+            .unwrap_or_else(|| self.backend.default_binary_path())
     }
 }
 
@@ -63,16 +53,12 @@ fn main() -> ExitCode {
 
 fn run(args: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let path = args.binary_path();
-    let assets = Arc::new(match args.backend {
-        Backend::Macos => backend::Assets::Macos(adi_macos::Binary::open(path)?),
-        Backend::Android => backend::Assets::Android(adi_android::Libraries::open(path)?),
-        Backend::Windows => backend::Assets::Windows(adi_windows::Binary::open(path)?),
-    });
+    let assets = Arc::new(args.backend.load(path)?);
     if args.check {
         println!("{} backend binaries verified", assets.name());
         return Ok(());
     }
-    let worker = backend::V1Worker::start(assets.clone(), &args.state_dir)?;
+    let registry = backend::Registry::start(assets, &args.state_dir)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .max_blocking_threads(8)
@@ -81,10 +67,11 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let result = runtime.block_on(async {
         let listener = tokio::net::TcpListener::bind(args.listen).await?;
         let (stop, stopping) = tokio::sync::watch::channel(false);
-        let app = http::App::new(assets, worker.sender.clone(), stopping);
+        let app = http::App::new(registry.clone(), stopping);
         eprintln!(
-            "Listening on {}; macOS/Windows V3 require routing extension; Android standard V3 defaults to routing 17106176",
-            listener.local_addr()?
+            "Listening on {}; default backend={}; override per request with ?backend=android|macos|windows",
+            listener.local_addr()?,
+            registry.default_backend().name()
         );
         let server = http::serve(listener, app, stop.clone());
         tokio::pin!(server);
@@ -96,8 +83,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
         }
     });
-    drop(worker.sender);
-    worker.join.join().map_err(|_| "V1 worker panicked")?;
+    registry.shutdown()?;
     result?;
     Ok(())
 }

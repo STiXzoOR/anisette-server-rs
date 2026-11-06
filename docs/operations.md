@@ -13,7 +13,7 @@ docker run --rm --name anisette-macos -p 127.0.0.1:6969:6969 \
   ghcr.io/fdkevin0/anisette-server-rs:latest --backend macos
 ```
 
-Use `--backend android`, `--backend macos`, or `--backend windows` to select a backend. Each running container serves one backend and must use its own dedicated state volume (`/data`). Do not share a state volume across backends or concurrent container instances.
+Use `--backend android`, `--backend macos`, or `--backend windows` to set the default backend at startup, or pass `?backend=android|macos|windows` on individual API requests. The default backend stores its V1 state at `/data/identity.json`, while any non-default V1 backend requested via `?backend=` is initialized lazily on first request under `/data/<backend>/identity.json`. Do not share a state volume across concurrent container instances.
 
 ## Running locally
 
@@ -37,7 +37,7 @@ For macOS ADI, pass `--backend macos --binary ./assets/local/CoreADI-26.x86_64`;
 | State directory | `--state-dir` / `ANISETTE_STATE_DIR` | `data` | `/data` |
 | Binary override | `--binary` | Backend path below | Backend path below |
 
-CLI arguments override environment variables. Default `--binary` paths are `/assets` for Android, `/assets/CoreADI-26.x86_64` for macOS, and `/assets/CoreADI.dll` for Windows.
+CLI arguments override environment variables. `--binary` overrides the binary path for the startup `--backend`; default binary paths (also used when loading non-default backends via `?backend=`) are `/assets` for Android, `/assets/CoreADI-26.x86_64` for macOS, and `/assets/CoreADI.dll` for Windows.
 
 Keep the published host port bound to `127.0.0.1` for local use. Public deployments should run behind a reverse proxy with TLS and access control.
 

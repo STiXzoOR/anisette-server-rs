@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "adi-android"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anisette",
  "getrandom 0.4.3",
@@ -17,7 +17,7 @@ dependencies = [
 
 [[package]]
 name = "adi-macos"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anisette",
  "base64",
@@ -30,7 +30,7 @@ dependencies = [
 
 [[package]]
 name = "adi-windows"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anisette",
  "base64",
@@ -54,7 +54,7 @@ dependencies = [
 
 [[package]]
 name = "anisette"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "base64",
  "plist",
@@ -68,7 +68,7 @@ dependencies = [
 
 [[package]]
 name = "anisette-server"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "adi-android",
  "adi-macos",

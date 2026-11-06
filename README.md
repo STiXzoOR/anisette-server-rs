@@ -23,23 +23,31 @@ curl -s http://127.0.0.1:6969/v3/client_info
 
 ### Switching backends
 
-The container image bundles Android (`android`, default), macOS (`macos`), and Windows (`windows`) ADI binaries. Use a separate state volume for each backend:
+`--backend <android|macos|windows>` sets the container's default backend (`android` by default). You can also override the backend per HTTP/WebSocket request using the `?backend=android|macos|windows` query parameter on a single running container:
 
 ```sh
-# macOS adid backend
+# Use the container's default backend (android)
+curl -s http://127.0.0.1:6969/
+
+# Request macOS or Windows headers on the fly via query parameter
+curl -s "http://127.0.0.1:6969/?backend=macos"
+curl -s "http://127.0.0.1:6969/v3/client_info?backend=windows"
+```
+
+Or start a container with a different default `--backend`:
+
+```sh
+# macOS adid as default backend
 docker run --rm -p 127.0.0.1:6969:6969 \
   --mount type=volume,src=anisette-macos-data,dst=/data \
   ghcr.io/fdkevin0/anisette-server-rs:latest --backend macos
-
-# Windows CoreADI backend
-docker run --rm -p 127.0.0.1:6969:6969 \
-  --mount type=volume,src=anisette-windows-data,dst=/data \
-  ghcr.io/fdkevin0/anisette-server-rs:latest --backend windows
 ```
 
-All three backends support V1 (`GET /`) directly. Standard unmodified V3 clients should use `--backend android`; provisioning new macOS or Windows devices over V3 requires the `X-Apple-I-MD-RINFO` finish-provisioning field (see [Compatibility](docs/compatibility.md)).
+All three backends support V1 (`GET /`) directly. Non-default V1 backends are provisioned lazily on first request and store their state under `/data/<backend>/identity.json`. Standard unmodified V3 clients should use `android`; provisioning new macOS or Windows devices over V3 requires the `X-Apple-I-MD-RINFO` finish-provisioning field (see [Compatibility](docs/compatibility.md)).
 
 ## API endpoints
+
+All four endpoints accept an optional `?backend=android|macos|windows` query parameter (defaulting to the server's `--backend` startup flag):
 
 | Endpoint | Method | Description |
 | --- | --- | --- |

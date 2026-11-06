@@ -1,6 +1,6 @@
 # V1/V3 protocol reference
 
-The HTTP and WebSocket routes follow [Dadoum/anisette-v3-server (`source/app.d`)](https://github.com/Dadoum/anisette-v3-server/blob/684895737aaf1a1c4586fcd5b67509ffd500a36c/source/app.d) and [SideStore's `omnisette` V3 client](https://github.com/SideStore/apple-private-apis/blob/03beb1aa42991ccdad6214dee77e72282bef461f/omnisette/src/remote_anisette_v3.rs).
+The HTTP and WebSocket routes follow [Dadoum/anisette-v3-server (`source/app.d`)](https://github.com/Dadoum/anisette-v3-server/blob/684895737aaf1a1c4586fcd5b67509ffd500a36c/source/app.d) and [SideStore's `omnisette` V3 client](https://github.com/SideStore/apple-private-apis/blob/03beb1aa42991ccdad6214dee77e72282bef461f/omnisette/src/remote_anisette_v3.rs). All four routes accept an optional `?backend=android|macos|windows` query parameter to override the server's default `--backend` per request (unrecognized or duplicate query parameters return `400 Bad Request`).
 
 | Endpoint | Methods | Input | Output |
 | --- | --- | --- | --- |
@@ -48,7 +48,7 @@ server closes connection
 - WebSocket upgrades reject browser `Origin` headers (`400 Bad Request`) to prevent cross-site WebSocket hijacking on loopback.
 - All HTTP responses include `Cache-Control: no-store` and `Implementation-Version: anisette-server-rs/<version>`.
 - WebSocket stages wait at most 3 seconds for each client message and 3 seconds per send; control frames (`Ping`/`Pong`) are bounded to 16 per read and do not extend stage deadlines.
-- Concurrency budgets: 64 TCP connections (10s header timeout), 32 in-flight HTTP requests, 4 V3 OTP workers, 4 concurrent V3 provisioning sessions, and 1 V1 worker (queue depth 4). Exhausted capacity returns `503 Service Unavailable`.
+- Concurrency budgets: 64 TCP connections (10s header timeout), 32 in-flight HTTP requests, 4 V3 OTP workers, 4 concurrent V3 provisioning sessions, and 1 V1 worker per active backend (queue depth 4). Exhausted capacity returns `503 Service Unavailable`.
 - Each native Unicorn execution is bounded to 5 seconds or 50 million instructions.
 
 ## `X-Apple-I-MD-RINFO` extension in V3 finish messages

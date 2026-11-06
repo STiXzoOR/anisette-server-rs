@@ -1,4 +1,4 @@
-use crate::backend::{self, Assets, Context, V1Request};
+use crate::backend::{self, Backend, Context, Registry};
 use anisette::{
     protocol::{HeadersRequest, MAX_MESSAGE_BYTES, ServerMessage, parse_message},
     session::Session,
@@ -35,23 +35,19 @@ type Command = (Vec<u8>, oneshot::Sender<Value>);
 type Response = HttpResponse<Full<Bytes>>;
 #[derive(Clone, Debug)]
 pub struct App {
-    pub assets: Arc<Assets>,
-    pub v1: mpsc::Sender<V1Request>,
+    pub registry: Arc<Registry>,
     pub stopping: watch::Receiver<bool>,
+    v1_init: Arc<Semaphore>,
     headers: Arc<Semaphore>,
     sessions: Arc<Semaphore>,
     requests: Arc<Semaphore>,
 }
 impl App {
-    pub fn new(
-        assets: Arc<Assets>,
-        v1: mpsc::Sender<V1Request>,
-        stopping: watch::Receiver<bool>,
-    ) -> Self {
+    pub fn new(registry: Arc<Registry>, stopping: watch::Receiver<bool>) -> Self {
         Self {
-            assets,
-            v1,
+            registry,
             stopping,
+            v1_init: Arc::new(Semaphore::new(2)),
             headers: Arc::new(Semaphore::new(4)),
             sessions: Arc::new(Semaphore::new(4)),
             requests: Arc::new(Semaphore::new(32)),
@@ -59,6 +55,7 @@ impl App {
     }
     pub async fn drain(&self) {
         // Permits stay in workers until native execution and cleanup actually finish.
+        let _v1_init = self.v1_init.acquire_many(2).await;
         let _headers = self.headers.acquire_many(4).await;
         let _sessions = self.sessions.acquire_many(4).await;
     }
@@ -161,16 +158,49 @@ async fn handle(app: App, request: Request<Incoming>) -> Result<Response, Infall
     metadata(&mut response);
     Ok(response)
 }
+fn select_backend(query: Option<&str>, default: Backend) -> Result<Backend, ()> {
+    let Some(query) = query.filter(|q| !q.is_empty()) else {
+        return Ok(default);
+    };
+    let mut selected = None;
+    for pair in query.split('&') {
+        let Some(("backend", value)) = pair.split_once('=') else {
+            return Err(());
+        };
+        if selected.is_some() {
+            return Err(());
+        }
+        selected = Some(value.parse().map_err(|_| ())?);
+    }
+    Ok(selected.unwrap_or(default))
+}
 async fn route(app: App, request: Request<Incoming>) -> Response {
     let get_or_head = request.method() == Method::GET || request.method() == Method::HEAD;
     let allowed = match request.uri().path() {
-        "/" if request.method() == Method::GET => return v1(&app).await,
-        "/v3/client_info" if get_or_head => {
-            return json(
-                serde_json::to_value(app.assets.profile()).expect("ClientInfo serializes"),
-            );
+        "/" | "/v3/provisioning_session" if request.method() == Method::GET => None,
+        "/v3/client_info" if get_or_head => None,
+        "/v3/get_headers" if request.method() == Method::POST => None,
+        "/" | "/v3/provisioning_session" => Some("GET"),
+        "/v3/client_info" => Some("GET, HEAD"),
+        "/v3/get_headers" => Some("POST"),
+        _ => return empty(StatusCode::NOT_FOUND),
+    };
+    if let Some(allowed) = allowed {
+        let mut response = empty(StatusCode::METHOD_NOT_ALLOWED);
+        response
+            .headers_mut()
+            .insert(header::ALLOW, HeaderValue::from_static(allowed));
+        return response;
+    }
+    let Ok(backend) = select_backend(request.uri().query(), app.registry.default_backend()) else {
+        return empty(StatusCode::BAD_REQUEST);
+    };
+    match request.uri().path() {
+        "/" => v1(&app, backend).await,
+        "/v3/client_info" => {
+            json(serde_json::to_value(backend.profile()).expect("ClientInfo serializes"))
         }
-        "/v3/get_headers" if request.method() == Method::POST => {
+        "/v3/get_headers" => {
             let collected = tokio::time::timeout(
                 CLIENT_WAIT,
                 Limited::new(request.into_body(), MAX_MESSAGE_BYTES).collect(),
@@ -191,35 +221,38 @@ async fn route(app: App, request: Request<Incoming>) -> Response {
                 }
                 Err(_) => return empty(StatusCode::REQUEST_TIMEOUT),
             };
-            return headers(app, &bytes).await;
+            headers(app, backend, &bytes).await
         }
-        "/v3/provisioning_session" if request.method() == Method::GET => {
-            return provision(app, request);
-        }
-        "/" | "/v3/provisioning_session" => "GET",
-        "/v3/client_info" => "GET, HEAD",
-        "/v3/get_headers" => "POST",
-        _ => return empty(StatusCode::NOT_FOUND),
-    };
-    let mut response = empty(StatusCode::METHOD_NOT_ALLOWED);
-    response
-        .headers_mut()
-        .insert(header::ALLOW, HeaderValue::from_static(allowed));
-    response
+        _ => provision(app, backend, request),
+    }
 }
-async fn v1(app: &App) -> Response {
-    let (reply, receive) = oneshot::channel();
-    if app.v1.try_send(reply).is_err() {
-        return empty(StatusCode::SERVICE_UNAVAILABLE);
-    }
-    match tokio::time::timeout(EXECUTION_WAIT, receive).await {
-        Ok(Ok(Ok(value))) => json(value),
-        _ => {
-            let mut response = failure("V1 worker unavailable");
-            *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
-            response
+async fn v1(app: &App, backend: Backend) -> Response {
+    let sender = if let Some(sender) = app.registry.existing_v1_sender(backend) {
+        Some(sender)
+    } else {
+        let Ok(permit) = app.v1_init.clone().try_acquire_owned() else {
+            return empty(StatusCode::SERVICE_UNAVAILABLE);
+        };
+        let registry = app.registry.clone();
+        let task = spawn_worker(permit, move || registry.v1_sender(backend));
+        tokio::time::timeout(EXECUTION_WAIT, task)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .and_then(Result::ok)
+    };
+    if let Some(sender) = sender {
+        let (reply, receive) = oneshot::channel();
+        if sender.try_send(reply).is_err() {
+            return empty(StatusCode::SERVICE_UNAVAILABLE);
+        }
+        if let Ok(Ok(Ok(value))) = tokio::time::timeout(EXECUTION_WAIT, receive).await {
+            return json(value);
         }
     }
+    let mut response = failure("V1 worker unavailable");
+    *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+    response
 }
 fn spawn_worker<T: Send + 'static>(
     permit: tokio::sync::OwnedSemaphorePermit,
@@ -235,7 +268,7 @@ fn decode_headers(
 ) -> Result<(anisette::protocol::Identifier, Vec<u8>), anisette::protocol::InputError> {
     parse_message::<HeadersRequest>(bytes)?.decode()
 }
-async fn headers(app: App, bytes: &[u8]) -> Response {
+async fn headers(app: App, backend: Backend, bytes: &[u8]) -> Response {
     let (identifier, state) = match decode_headers(bytes) {
         Ok(v) => v,
         Err(_) => return failure("invalid identifier or state"),
@@ -244,10 +277,15 @@ async fn headers(app: App, bytes: &[u8]) -> Response {
         return empty(StatusCode::SERVICE_UNAVAILABLE);
     };
     let task = spawn_worker(permit, move || {
-        backend::headers(&app.assets, identifier, &state)
+        let assets = app
+            .registry
+            .assets(backend)
+            .map_err(|_| "requested backend unavailable")?;
+        backend::headers(&assets, identifier, &state)
     });
     match tokio::time::timeout(EXECUTION_WAIT, task).await {
         Ok(Ok(Ok(value))) => json(value),
+        Ok(Ok(Err(message))) => failure(message),
         _ => failure("state restoration or OTP generation failed"),
     }
 }
@@ -268,7 +306,7 @@ fn websocket_config() -> WebSocketConfig {
         .max_frame_size(Some(MAX_MESSAGE_BYTES))
         .max_write_buffer_size(MAX_MESSAGE_BYTES + 65536)
 }
-fn provision(app: App, mut request: Request<Incoming>) -> Response {
+fn provision(app: App, backend: Backend, mut request: Request<Incoming>) -> Response {
     let response = match upgrade_response(&request) {
         Ok(r) => r,
         Err(()) => return empty(StatusCode::BAD_REQUEST),
@@ -289,14 +327,18 @@ fn provision(app: App, mut request: Request<Incoming>) -> Response {
         )
         .await;
         let (sender, mut receiver) = mpsc::channel::<Command>(1);
+        let registry = app.registry.clone();
         let task = spawn_worker(permit, move || {
+            let assets = registry.assets(backend);
             let mut session = Session::<Context>::new();
             while let Some((bytes, reply)) = receiver.blocking_recv() {
                 if reply.is_closed() {
                     break;
                 }
-                let Some(value) = session.receive(&bytes, |id| Context::new(&app.assets, id))
-                else {
+                let Some(value) = session.receive(&bytes, |id| {
+                    let assets = assets.as_ref().map_err(|_| "backend unavailable")?;
+                    Context::new(assets, id)
+                }) else {
                     break;
                 };
                 if reply.send(value).is_err() || session.is_closed() {
@@ -390,9 +432,9 @@ async fn conversation<S: AsyncRead + AsyncWrite + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::{
-        Arc, Command, Duration, HeaderValue, MAX_MESSAGE_BYTES, Request, Semaphore, StatusCode,
-        StreamExt, TcpListener, Value, conversation, decode_headers, header, json, metadata, mpsc,
-        spawn_worker, upgrade_response, watch, websocket_config,
+        Arc, Backend, Command, Duration, HeaderValue, MAX_MESSAGE_BYTES, Request, Semaphore,
+        StatusCode, StreamExt, TcpListener, Value, conversation, decode_headers, header, json,
+        metadata, mpsc, select_backend, spawn_worker, upgrade_response, watch, websocket_config,
     };
     use futures_util::SinkExt;
     use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
@@ -563,6 +605,27 @@ mod tests {
             &vec![0; MAX_MESSAGE_BYTES + 1],
         ] {
             assert!(decode_headers(bytes).is_err());
+        }
+    }
+    #[test]
+    fn query_parameter_selects_backend_or_rejects_invalid_values() {
+        assert_eq!(select_backend(None, Backend::Android), Ok(Backend::Android));
+        assert_eq!(select_backend(Some(""), Backend::Macos), Ok(Backend::Macos));
+        for (query, expected) in [
+            ("backend=android", Backend::Android),
+            ("backend=macos", Backend::Macos),
+            ("backend=windows", Backend::Windows),
+        ] {
+            assert_eq!(select_backend(Some(query), Backend::Android), Ok(expected));
+        }
+        for invalid in [
+            "backend=ios",
+            "backend=",
+            "other=android",
+            "backend=android&backend=macos",
+            "backend=android&extra=1",
+        ] {
+            assert!(select_backend(Some(invalid), Backend::Android).is_err());
         }
     }
 }

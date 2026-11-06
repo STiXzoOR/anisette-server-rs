@@ -5,28 +5,204 @@ use anisette::{
     session::ProvisioningContext,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
+use clap::ValueEnum;
 use serde_json::Value;
 use std::{
-    path::Path,
-    sync::{Arc, mpsc},
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, mpsc},
     thread,
 };
 use tokio::sync::oneshot;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Backend {
+    Android,
+    Macos,
+    Windows,
+}
+
+impl Backend {
+    const fn index(self) -> usize {
+        match self {
+            Self::Android => 0,
+            Self::Macos => 1,
+            Self::Windows => 2,
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Android => "android",
+            Self::Macos => "macos",
+            Self::Windows => "windows",
+        }
+    }
+
+    pub fn default_binary_path(self) -> &'static Path {
+        Path::new(match self {
+            Self::Android => "/assets",
+            Self::Macos => "/assets/CoreADI-26.x86_64",
+            Self::Windows => "/assets/CoreADI.dll",
+        })
+    }
+
+    pub const fn profile(self) -> ClientInfo<'static> {
+        match self {
+            Self::Macos => ClientInfo {
+                client_info: adi_macos::provisioning::CLIENT_INFO,
+                user_agent: adi_macos::provisioning::USER_AGENT,
+            },
+            // Android uses the Windows HTTP profile; its ADI binary remains Android.
+            Self::Android | Self::Windows => ClientInfo {
+                client_info: "<PC> <Windows;6.2(0,0);9200> <com.apple.AuthKit/1 (com.apple.akd/1.0)>",
+                user_agent: "akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0",
+            },
+        }
+    }
+
+    pub fn load(self, path: &Path) -> Result<Assets, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(match self {
+            Self::Macos => Assets::Macos(adi_macos::Binary::open(path)?),
+            Self::Android => Assets::Android(adi_android::Libraries::open(path)?),
+            Self::Windows => Assets::Windows(adi_windows::Binary::open(path)?),
+        })
+    }
+}
+
+impl std::str::FromStr for Backend {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "android" => Ok(Self::Android),
+            "macos" => Ok(Self::Macos),
+            "windows" => Ok(Self::Windows),
+            _ => Err("unknown backend"),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Registry {
+    default: Backend,
+    state_dir: PathBuf,
+    assets: [Mutex<Option<Arc<Assets>>>; 3],
+    v1_senders: [Mutex<Option<tokio::sync::mpsc::Sender<V1Request>>>; 3],
+    v1_joins: Mutex<Option<Vec<thread::JoinHandle<()>>>>,
+}
+
+impl Registry {
+    pub fn start(default_assets: Arc<Assets>, state_dir: &Path) -> Result<Arc<Self>, String> {
+        let default = default_assets.backend();
+        let mut assets = std::array::from_fn(|_| Mutex::new(None));
+        assets[default.index()] = Mutex::new(Some(default_assets));
+        let registry = Arc::new(Self {
+            default,
+            state_dir: state_dir.to_path_buf(),
+            assets,
+            v1_senders: std::array::from_fn(|_| Mutex::new(None)),
+            v1_joins: Mutex::new(Some(Vec::new())),
+        });
+        registry.v1_sender(default)?;
+        Ok(registry)
+    }
+
+    pub const fn default_backend(&self) -> Backend {
+        self.default
+    }
+
+    pub fn assets(&self, backend: Backend) -> Result<Arc<Assets>, String> {
+        let mut slot = self.assets[backend.index()]
+            .lock()
+            .map_err(|_| "registry lock poisoned")?;
+        if let Some(existing) = &*slot {
+            return Ok(existing.clone());
+        }
+        let loaded = Arc::new(
+            backend
+                .load(backend.default_binary_path())
+                .map_err(|e| e.to_string())?,
+        );
+        *slot = Some(loaded.clone());
+        Ok(loaded)
+    }
+
+    pub fn existing_v1_sender(
+        &self,
+        backend: Backend,
+    ) -> Option<tokio::sync::mpsc::Sender<V1Request>> {
+        self.v1_senders[backend.index()]
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
+    }
+
+    pub fn v1_sender(
+        &self,
+        backend: Backend,
+    ) -> Result<tokio::sync::mpsc::Sender<V1Request>, String> {
+        if let Some(existing) = self.existing_v1_sender(backend) {
+            return Ok(existing);
+        }
+        let assets = self.assets(backend)?;
+        let mut joins = self.v1_joins.lock().map_err(|_| "registry lock poisoned")?;
+        let Some(joins) = &mut *joins else {
+            return Err("server shutting down".into());
+        };
+        if let Some(existing) = self.existing_v1_sender(backend) {
+            return Ok(existing);
+        }
+        let dir = v1_state_dir(&self.state_dir, self.default, backend);
+        let worker = V1Worker::start(assets, &dir)?;
+        *self.v1_senders[backend.index()]
+            .lock()
+            .map_err(|_| "registry lock poisoned")? = Some(worker.sender.clone());
+        joins.push(worker.join);
+        Ok(worker.sender)
+    }
+
+    pub fn shutdown(&self) -> Result<(), &'static str> {
+        let joins = self
+            .v1_joins
+            .lock()
+            .map_err(|_| "registry lock poisoned")?
+            .take()
+            .unwrap_or_default();
+        for slot in &self.v1_senders {
+            if let Ok(mut guard) = slot.lock() {
+                *guard = None;
+            }
+        }
+        for join in joins {
+            join.join().map_err(|_| "V1 worker panicked")?;
+        }
+        Ok(())
+    }
+}
+
+fn v1_state_dir(state_dir: &Path, default: Backend, backend: Backend) -> PathBuf {
+    let sub_dir = state_dir.join(backend.name());
+    if backend == default && !sub_dir.join("identity.json").exists() {
+        state_dir.to_path_buf()
+    } else {
+        sub_dir
+    }
+}
+
 pub type Reply = Result<Value, &'static str>;
 pub type V1Request = oneshot::Sender<Reply>;
 #[derive(Debug)]
-pub struct V1Worker {
-    pub sender: tokio::sync::mpsc::Sender<V1Request>,
-    pub join: thread::JoinHandle<()>,
+struct V1Worker {
+    sender: tokio::sync::mpsc::Sender<V1Request>,
+    join: thread::JoinHandle<()>,
 }
 impl V1Worker {
-    pub fn start(assets: Arc<Assets>, directory: &Path) -> Result<Self, String> {
+    fn start(assets: Arc<Assets>, directory: &Path) -> Result<Self, String> {
         let store = Store::open(directory, assets.name()).map_err(|e| e.to_string())?;
         let (sender, mut receiver) = tokio::sync::mpsc::channel::<V1Request>(4);
         let (ready, result) = mpsc::sync_channel(1);
         let join = thread::Builder::new()
-            .name("adi-v1".into())
+            .name(format!("adi-v1-{}", assets.name()))
             .spawn(move || {
                 let initialized = (|| -> provisioning::Result<_> {
                     let (identifier, mut runtime, headers) = match store.load()? {
@@ -102,7 +278,7 @@ impl V1Worker {
                             let _ = reply.send(Ok(value));
                         }
                         Err(e) => {
-                            eprintln!("V1 worker error: {e}");
+                            eprintln!("V1 worker ({}) error: {e}", assets.name());
                             let _ = reply
                                 .send(Err("V1 generation or persistence failed; restart required"));
                             // Never continue after state save or emulator failure with uncertain state.
@@ -213,25 +389,18 @@ pub enum Assets {
     Windows(adi_windows::Binary),
 }
 impl Assets {
-    pub fn name(&self) -> &'static str {
+    pub const fn backend(&self) -> Backend {
         match self {
-            Self::Macos(_) => "macos",
-            Self::Android(_) => "android",
-            Self::Windows(_) => "windows",
+            Self::Macos(_) => Backend::Macos,
+            Self::Android(_) => Backend::Android,
+            Self::Windows(_) => Backend::Windows,
         }
     }
-    pub fn profile(&self) -> ClientInfo<'static> {
-        match self {
-            Self::Macos(_) => ClientInfo {
-                client_info: adi_macos::provisioning::CLIENT_INFO,
-                user_agent: adi_macos::provisioning::USER_AGENT,
-            },
-            // Android uses the Windows HTTP profile; its ADI binary remains Android.
-            Self::Android(_) | Self::Windows(_) => ClientInfo {
-                client_info: "<PC> <Windows;6.2(0,0);9200> <com.apple.AuthKit/1 (com.apple.akd/1.0)>",
-                user_agent: "akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0",
-            },
-        }
+    pub const fn name(&self) -> &'static str {
+        self.backend().name()
+    }
+    pub const fn profile(&self) -> ClientInfo<'static> {
+        self.backend().profile()
     }
 }
 #[derive(Debug)]
@@ -357,7 +526,35 @@ impl Device {
 
 #[cfg(test)]
 mod tests {
-    use super::{Assets, Context, Device, Identifier, Path, ProvisioningContext, provisioning};
+    use super::{
+        Assets, Backend, Context, Device, Identifier, Path, ProvisioningContext, provisioning,
+        v1_state_dir,
+    };
+
+    #[test]
+    fn v1_state_dir_preserves_root_for_default_and_isolates_other_backends() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path();
+        assert_eq!(
+            v1_state_dir(state, Backend::Android, Backend::Android),
+            state
+        );
+        assert_eq!(
+            v1_state_dir(state, Backend::Android, Backend::Macos),
+            state.join("macos")
+        );
+        assert_eq!(
+            v1_state_dir(state, Backend::Android, Backend::Windows),
+            state.join("windows")
+        );
+        let android_sub = state.join("android");
+        std::fs::create_dir_all(&android_sub).unwrap();
+        std::fs::write(android_sub.join("identity.json"), "{}").unwrap();
+        assert_eq!(
+            v1_state_dir(state, Backend::Android, Backend::Android),
+            android_sub
+        );
+    }
     #[test]
     #[ignore = "requires macOS/Windows binaries, Apple network and permitted Unicorn JIT"]
     fn live_missing_routing_checks_completed_native_state() {

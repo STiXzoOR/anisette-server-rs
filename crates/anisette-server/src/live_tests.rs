@@ -12,16 +12,16 @@ struct Server {
     url: String,
     stop: watch::Sender<bool>,
     task: Option<thread::JoinHandle<()>>,
-    worker: Option<backend::V1Worker>,
+    registry: Arc<backend::Registry>,
 }
 impl Server {
     fn start(binary: Arc<backend::Assets>, path: &std::path::Path) -> Self {
-        let worker = backend::V1Worker::start(binary.clone(), path).unwrap();
+        let registry = backend::Registry::start(binary, path).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let (stop, stopping) = watch::channel(false);
-        let app = http::App::new(binary, worker.sender.clone(), stopping.clone());
+        let app = http::App::new(registry.clone(), stopping);
         let server_stop = stop.clone();
         let task = thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -39,7 +39,7 @@ impl Server {
             url,
             stop,
             task: Some(task),
-            worker: Some(worker),
+            registry,
         }
     }
 }
@@ -49,10 +49,7 @@ impl Drop for Server {
         if let Some(task) = self.task.take() {
             let _ = task.join();
         }
-        if let Some(worker) = self.worker.take() {
-            drop(worker.sender);
-            let _ = worker.join.join();
-        }
+        let _ = self.registry.shutdown();
     }
 }
 fn socket(
