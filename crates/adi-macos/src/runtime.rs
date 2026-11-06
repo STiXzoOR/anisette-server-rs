@@ -2,7 +2,7 @@
 // Memory layout and import model adapted from os-findmy-e macOS-ADI-emulator/harness.py.
 use crate::{Binary, Error};
 use anisette::memory::Heap;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt};
 use unicorn_engine::{
     RegisterX86, Unicorn,
     unicorn_const::{Arch, Mode, Prot},
@@ -111,6 +111,13 @@ pub struct Runtime {
     pub(crate) cpu: Cpu<'static>,
     poisoned: bool,
 }
+impl fmt::Debug for Runtime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Runtime")
+            .field("poisoned", &self.poisoned)
+            .finish_non_exhaustive()
+    }
+}
 impl Runtime {
     pub(crate) fn ensure_usable(&self) -> Result<(), Error> {
         if self.poisoned {
@@ -125,16 +132,16 @@ impl Runtime {
     /// Returns an error if randomness, guest memory setup, import binding, or emulator initialization fails.
     pub fn new(binary: &Binary) -> Result<Self, Error> {
         let mut cpu = Unicorn::new_with_data(Arch::X86, Mode::MODE_64, Env::new()?)?;
-        for (address, size) in [
-            (RETURN, 4096),
-            (HEAP, HEAP_SIZE),
-            (STACK, STACK_SIZE),
-            (STUB, STUB_SIZE),
-            (DATA, STUB_SIZE),
-            (SCRATCH, ARENA_SIZE),
-            (OBJECT, ARENA_SIZE),
+        for (address, size, prot) in [
+            (RETURN, 4096, Prot::READ | Prot::EXEC),
+            (HEAP, HEAP_SIZE, Prot::READ | Prot::WRITE),
+            (STACK, STACK_SIZE, Prot::READ | Prot::WRITE),
+            (STUB, STUB_SIZE, Prot::READ | Prot::WRITE),
+            (DATA, STUB_SIZE, Prot::READ | Prot::WRITE),
+            (SCRATCH, ARENA_SIZE, Prot::READ | Prot::WRITE),
+            (OBJECT, ARENA_SIZE, Prot::READ | Prot::WRITE),
         ] {
-            cpu.mem_map(address, size, Prot::ALL)?;
+            cpu.mem_map(address, size, prot)?;
         }
         for segment in &binary.image().segments {
             if segment.name == "__PAGEZERO" || segment.size == 0 {
@@ -155,6 +162,7 @@ impl Runtime {
         getrandom::fill(&mut cpu.get_data_mut().host_uuid)
             .map_err(|_| Error::Execution("host random source failed"))?;
         cpu.mem_write(STUB, &vec![0xc3; STUB_SIZE as usize])?;
+        cpu.mem_protect(STUB, STUB_SIZE, Prot::READ | Prot::EXEC)?;
         let mut addresses = BTreeMap::new();
         for binding in &binary.image().bindings {
             let name = binding.symbol.trim_start_matches('_');
@@ -272,8 +280,7 @@ impl Runtime {
         Ok(())
     }
     fn invoke_block(&mut self, block: u64, argument: u64) -> Result<(), Error> {
-        let function =
-            u64::from_le_bytes(self.cpu.mem_read_as_vec(block + 16, 8)?.try_into().unwrap());
+        let function = read_u64(&self.cpu, block + 16)?;
         self.invoke(function, &[block, argument], false)?;
         Ok(())
     }
@@ -310,12 +317,8 @@ impl Runtime {
             let data = reply
                 .get("data")
                 .ok_or(Error::Execution("missing ADI reply data"))?;
-            let status = i32::from_be_bytes(
-                data.get(..4)
-                    .ok_or(Error::Execution("short ADI reply"))?
-                    .try_into()
-                    .unwrap(),
-            );
+            let header = data.get(..4).ok_or(Error::Execution("short ADI reply"))?;
+            let status = i32::from_be_bytes([header[0], header[1], header[2], header[3]]);
             Ok((status, data[4..].to_vec()))
         })();
         let env = self.cpu.get_data_mut();
@@ -325,6 +328,11 @@ impl Runtime {
         env.reply = None;
         result
     }
+}
+pub(crate) fn read_u64(cpu: &Cpu<'_>, address: u64) -> Result<u64, Error> {
+    let mut bytes = [0u8; 8];
+    cpu.mem_read(address, &mut bytes)?;
+    Ok(u64::from_le_bytes(bytes))
 }
 pub(crate) fn argument(cpu: &Cpu<'_>, index: usize) -> Result<u64, Error> {
     Ok(cpu.reg_read(ARGUMENTS[index])?)
@@ -392,8 +400,7 @@ fn import(cpu: &mut Cpu<'_>, name: &str) -> Result<Option<u64>, Error> {
             let p = argument(cpu, 1)?;
             let lenp = argument(cpu, 2)?;
             if p != 0 && lenp != 0 {
-                let n =
-                    u64::from_le_bytes(cpu.mem_read_as_vec(lenp, 8)?.try_into().unwrap()).min(8);
+                let n = read_u64(cpu, lenp)?.min(8);
                 cpu.mem_write(p, &vec![0; n as usize])?;
             }
             0
@@ -446,7 +453,7 @@ fn import(cpu: &mut Cpu<'_>, name: &str) -> Result<Option<u64>, Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Arch, Env, Error, Mode, Prot, Runtime, STACK, STACK_SIZE, Unicorn, bump};
     #[test]
     fn bounded_arenas_reject_overflow() {
         let mut cursor = 16;

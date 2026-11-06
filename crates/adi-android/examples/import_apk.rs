@@ -1,6 +1,6 @@
 //! Explicit offline import of the pinned Apple Music APK; never run at service startup.
 use adi_android::{FILES, Libraries};
-use sha2::{Digest, Sha256};
+use anisette::protocol::verify_sha256;
 use std::{
     fs,
     io::{Cursor, Read, Write},
@@ -21,13 +21,7 @@ fn import(apk: &Path, destination: &Path) -> Result<()> {
     }
     let mut bytes = Vec::new();
     file.take(APK_SIZE + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 != APK_SIZE
-        || Sha256::digest(&bytes)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>()
-            != APK_HASH
-    {
+    if bytes.len() as u64 != APK_SIZE || !verify_sha256(&bytes, APK_HASH) {
         return Err("unrecognized APK hash".into());
     }
     // Parse the verified in-memory bytes, so a replaced source cannot change extraction.
@@ -41,13 +35,7 @@ fn import(apk: &Path, destination: &Path) -> Result<()> {
         let entry = archive.by_name(&format!("lib/arm64-v8a/{name}"))?;
         let mut bytes = Vec::new();
         entry.take(32 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
-        if bytes.len() > 32 * 1024 * 1024
-            || Sha256::digest(&bytes)
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
-                != expected
-        {
+        if bytes.len() > 32 * 1024 * 1024 || !verify_sha256(&bytes, expected) {
             return Err("unrecognized extracted library".into());
         }
         let mut output = fs::File::create_new(temporary.path().join(name))?;
@@ -78,7 +66,7 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{fs, import};
     #[test]
     fn rejected_input_leaves_no_output_and_existing_directory_untouched() {
         let root = tempfile::tempdir().unwrap();

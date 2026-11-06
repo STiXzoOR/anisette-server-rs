@@ -8,15 +8,15 @@ The table was generated from `cargo metadata --locked --filter-platform TARGET -
 
 Container base packages retain their own package licenses and are outside this Cargo table. Curl is used only by the image build to download assets. Apple binaries remain proprietary; bundling them grants no redistribution rights. Source provenance and retained notices are recorded in [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
 
-Cargo.lock SHA-256: `2e8dfb0bb76ad8403926c48c2def3ff57740a4430974d2d033688e6177afcbba`.
+Cargo.lock SHA-256: `af2a4f70831a37b4e0499183291d7531fa627cfd60a1dbccdf4e74debd5969df`.
 
 | Package | Version | Declared SPDX | Normal dependency targets |
 | --- | --- | --- | --- |
-| adi-android | 0.1.0 | GPL-2.0-only | Linux AMD64, Linux ARM64, macOS ARM64, Windows x64 |
-| adi-macos | 0.1.0 | GPL-2.0-only | Linux AMD64, Linux ARM64, macOS ARM64, Windows x64 |
-| adi-windows | 0.1.0 | GPL-2.0-only | Linux AMD64, Linux ARM64, macOS ARM64, Windows x64 |
-| anisette | 0.1.0 | GPL-2.0-only | Linux AMD64, Linux ARM64, macOS ARM64, Windows x64 |
-| anisette-server | 0.1.0 | GPL-2.0-only | Linux AMD64, Linux ARM64, macOS ARM64, Windows x64 |
+| adi-android | 0.1.1 | GPL-2.0-only | Linux AMD64, Linux ARM64, macOS ARM64, Windows x64 |
+| adi-macos | 0.1.1 | GPL-2.0-only | Linux AMD64, Linux ARM64, macOS ARM64, Windows x64 |
+| adi-windows | 0.1.1 | GPL-2.0-only | Linux AMD64, Linux ARM64, macOS ARM64, Windows x64 |
+| anisette | 0.1.1 | GPL-2.0-only | Linux AMD64, Linux ARM64, macOS ARM64, Windows x64 |
+| anisette-server | 0.1.1 | GPL-2.0-only | Linux AMD64, Linux ARM64, macOS ARM64, Windows x64 |
 | anstream | 1.0.0 | MIT OR Apache-2.0 | Linux AMD64, Linux ARM64, macOS ARM64, Windows x64 |
 | anstyle | 1.0.14 | MIT OR Apache-2.0 | Linux AMD64, Linux ARM64, macOS ARM64, Windows x64 |
 | anstyle-parse | 1.0.0 | MIT OR Apache-2.0 | Linux AMD64, Linux ARM64, macOS ARM64, Windows x64 |
@@ -86,7 +86,7 @@ Cargo.lock SHA-256: `2e8dfb0bb76ad8403926c48c2def3ff57740a4430974d2d033688e6177a
 | libc | 0.2.191 | MIT OR Apache-2.0 | Linux AMD64, Linux ARM64, macOS ARM64, Windows x64 |
 | linux-raw-sys | 0.12.1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | Linux AMD64, Linux ARM64 |
 | litemap | 0.8.3 | Unicode-3.0 | Linux AMD64, Linux ARM64, macOS ARM64, Windows x64 |
-| log | 0.4.34 | MIT OR Apache-2.0 | Linux AMD64, Linux ARM64, macOS ARM64, Windows x64 |
+| log | 0.4.35 | MIT OR Apache-2.0 | Linux AMD64, Linux ARM64, macOS ARM64, Windows x64 |
 | lru-slab | 0.1.3 | MIT OR Apache-2.0 OR Zlib | Linux AMD64, Linux ARM64, macOS ARM64, Windows x64 |
 | memchr | 2.8.3 | Unlicense OR MIT | Linux AMD64, Linux ARM64, macOS ARM64, Windows x64 |
 | mio | 1.2.4 | MIT | Linux AMD64, Linux ARM64, macOS ARM64, Windows x64 |

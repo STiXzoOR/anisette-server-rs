@@ -1,6 +1,9 @@
-//! macOS profile and device provisioning orchestration.
+//! Pinned macOS 26 client profile metadata and device provisioning orchestration.
 use crate::{Binary, Runtime};
-use anisette::provisioning::{Exchange, Result};
+use anisette::{
+    protocol::{ClientInfo, DSID},
+    provisioning::{Exchange, Result},
+};
 pub const CLIENT_INFO: &str =
     "<MacBookPro16,2> <macOS;26.7.1;25G241> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
 pub const USER_AGENT: &str = "akd/1.0 CFNetwork/3860.100.1 Darwin/25.0.0";
@@ -13,12 +16,12 @@ pub fn provision(binary: &Binary, identifier: [u8; 16]) -> Result<Runtime> {
     runtime.boot()?;
     let (exchange, spim) = Exchange::start(
         identifier,
-        anisette::protocol::ClientInfo {
+        ClientInfo {
             client_info: CLIENT_INFO,
             user_agent: USER_AGENT,
         },
     )?;
-    let (cpim, session) = runtime.start_provisioning(-2, &spim)?;
+    let (cpim, session) = runtime.start_provisioning(DSID, &spim)?;
     let result = (|| -> Result<u64> {
         let finish = exchange.finish(&cpim)?;
         runtime.finish_provisioning(session, &finish.ptm, &finish.tk)?;
@@ -31,8 +34,8 @@ pub fn provision(binary: &Binary, identifier: [u8; 16]) -> Result<Runtime> {
             return Err(error);
         }
     };
-    runtime.set_routing(-2, routing)?;
-    if !runtime.is_machine_provisioned(-2)? {
+    runtime.set_routing(DSID, routing)?;
+    if !runtime.is_machine_provisioned(DSID)? {
         return Err("device is not provisioned".into());
     }
     Ok(runtime)

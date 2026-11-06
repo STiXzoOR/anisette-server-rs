@@ -14,10 +14,14 @@ fn bytes(d: &[u8], o: usize, n: usize) -> Result<&[u8], Error> {
         .ok_or(invalid("truncated image"))
 }
 fn u32_at(d: &[u8], o: usize) -> Result<u32, Error> {
-    Ok(u32::from_le_bytes(bytes(d, o, 4)?.try_into().unwrap()))
+    let b = bytes(d, o, 4)?;
+    Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
 fn u64_at(d: &[u8], o: usize) -> Result<u64, Error> {
-    Ok(u64::from_le_bytes(bytes(d, o, 8)?.try_into().unwrap()))
+    let b = bytes(d, o, 8)?;
+    Ok(u64::from_le_bytes([
+        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+    ]))
 }
 fn leb(d: &[u8], o: &mut usize, signed: bool) -> Result<u64, Error> {
     let mut value = 0u64;
@@ -86,7 +90,7 @@ impl Image {
             offset += size;
             if kind == 0x19 {
                 let name = bytes(c, 8, 16)?;
-                let name = std::str::from_utf8(name.split(|b| *b == 0).next().unwrap())
+                let name = std::str::from_utf8(name.split(|b| *b == 0).next().unwrap_or(name))
                     .map_err(|_| invalid("invalid segment name"))?
                     .to_owned();
                 let address = u64_at(c, 24)?;
@@ -236,7 +240,7 @@ impl Image {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Image, Segment, leb};
     #[test]
     fn rejects_malformed_commands_without_panics() {
         for len in 0..128 {

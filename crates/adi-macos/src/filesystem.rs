@@ -48,13 +48,12 @@ impl FileSystem {
         self.files.contains_key(path) || self.dirs.contains(path)
     }
     fn resize(&mut self, path: &str, size: usize) -> Result<(), i32> {
-        let old = self.files.get(path).ok_or(2)?.len();
-        if size > 1024 * 1024
-            || self.files.values().map(Vec::len).sum::<usize>() - old + size > MAX_BYTES
-        {
+        let total: usize = self.files.values().map(Vec::len).sum();
+        let file = self.files.get_mut(path).ok_or(2)?;
+        if size > 1024 * 1024 || total - file.len() + size > MAX_BYTES {
             return Err(28);
         }
-        self.files.get_mut(path).unwrap().resize(size, 0);
+        file.resize(size, 0);
         Ok(())
     }
     pub fn open(&mut self, path: String, flags: u64) -> Result<u64, i32> {
@@ -74,7 +73,7 @@ impl FileSystem {
             if self.files.len() >= MAX_FILES {
                 return Err(28);
             }
-            let parent = path.rsplit_once('/').unwrap().0;
+            let (parent, _) = path.rsplit_once('/').ok_or(22)?;
             if !self
                 .dirs
                 .contains(if parent.is_empty() { "/" } else { parent })
@@ -87,7 +86,7 @@ impl FileSystem {
             if flags & 3 == 0 {
                 return Err(9);
             }
-            self.files.get_mut(&path).unwrap().clear();
+            self.files.get_mut(&path).ok_or(2)?.clear();
         }
         let fd = self.next_fd;
         self.next_fd = self.next_fd.checked_add(1).ok_or(24)?;
@@ -124,8 +123,8 @@ impl FileSystem {
         let offset = d.offset;
         let end = offset.checked_add(bytes.len()).ok_or(28)?;
         self.resize(&path, end.max(self.files[&path].len()))?;
-        self.files.get_mut(&path).unwrap()[offset..end].copy_from_slice(bytes);
-        self.descriptors.get_mut(&fd).unwrap().offset = end;
+        self.files.get_mut(&path).ok_or(2)?[offset..end].copy_from_slice(bytes);
+        self.descriptors.get_mut(&fd).ok_or(9)?.offset = end;
         Ok(bytes.len())
     }
     pub fn truncate(&mut self, fd: u64, size: usize) -> Result<(), i32> {
@@ -145,7 +144,7 @@ impl FileSystem {
         if self.dirs.len() >= MAX_FILES {
             return Err(28);
         }
-        let parent = path.rsplit_once('/').unwrap().0;
+        let (parent, _) = path.rsplit_once('/').ok_or(22)?;
         if !self
             .dirs
             .contains(if parent.is_empty() { "/" } else { parent })
@@ -197,7 +196,7 @@ impl FileSystem {
 }
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{FileSystem, MAX_BYTES};
     #[test]
     fn file_lifecycle_permissions_and_limits() {
         let mut fs = FileSystem::default();

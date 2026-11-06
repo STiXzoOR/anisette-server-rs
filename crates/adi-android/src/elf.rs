@@ -6,7 +6,8 @@ use goblin::elf::{
 };
 use std::{collections::BTreeMap, ops::Range};
 
-pub struct Image {
+#[derive(Debug)]
+pub(crate) struct Image {
     pub bytes: Vec<u8>,
     pub size: u64,
     pub segments: Vec<(u64, Range<usize>)>,
@@ -26,7 +27,7 @@ impl Image {
         }
         let mut size = 0;
         let mut segments = vec![];
-        let mut mapped = vec![];
+        let mut mapped: Vec<Range<u64>> = vec![];
         for p in elf.program_headers.iter().filter(|p| p.p_type == PT_LOAD) {
             let end = p
                 .p_vaddr
@@ -40,6 +41,9 @@ impl Image {
                 .ok_or("ELF segment outside file")?;
             if p.p_filesz > p.p_memsz {
                 return Err("ELF file segment exceeds mapping".into());
+            }
+            if mapped.iter().any(|r| p.p_vaddr < r.end && r.start < end) {
+                return Err("overlapping ELF segments".into());
             }
             size = size.max(end);
             mapped.push(p.p_vaddr..end);
@@ -98,7 +102,7 @@ impl Image {
 }
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::Image;
     #[test]
     fn malformed_elf_fails_closed() {
         for bytes in [vec![], b"\x7fELF".to_vec(), vec![0; 128]] {

@@ -1,5 +1,5 @@
 //! Explicit device-only integration test; uses temporary identities and never prints secrets.
-use super::*;
+use super::{Arc, backend, http, store};
 use anisette::provisioning::Exchange;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use reqwest::blocking::Client;
@@ -132,7 +132,7 @@ fn run_live(binary: Arc<backend::Assets>, routing_extension: bool) {
         .unwrap()
         .json()
         .unwrap();
-    assert!(profile["client_info"] == binary.profile().client_info);
+    assert_eq!(profile["client_info"], binary.profile().client_info);
     let response = client.get(&server.url).send().unwrap();
     assert_eq!(response.status(), 200);
     assert_eq!(response.headers()["cache-control"], "no-store");
@@ -143,13 +143,13 @@ fn run_live(binary: Arc<backend::Assets>, routing_extension: bool) {
             .is_some_and(|s| !s.is_empty())
     );
     let next: Value = client.get(&server.url).send().unwrap().json().unwrap();
-    assert!(first["X-Apple-I-MD-M"] == next["X-Apple-I-MD-M"]);
-    assert!(first["X-Mme-Device-Id"] == next["X-Mme-Device-Id"]);
+    assert_eq!(first["X-Apple-I-MD-M"], next["X-Apple-I-MD-M"]);
+    assert_eq!(first["X-Mme-Device-Id"], next["X-Mme-Device-Id"]);
     drop(server);
     let server = Server::start(binary.clone(), &directory);
     let restored: Value = client.get(&server.url).send().unwrap().json().unwrap();
-    assert!(first["X-Apple-I-MD-M"] == restored["X-Apple-I-MD-M"]);
-    assert!(first["X-Mme-Device-Id"] == restored["X-Mme-Device-Id"]);
+    assert_eq!(first["X-Apple-I-MD-M"], restored["X-Apple-I-MD-M"]);
+    assert_eq!(first["X-Mme-Device-Id"], restored["X-Mme-Device-Id"]);
 
     let record: Value =
         serde_json::from_slice(&std::fs::read(directory.join("identity.json")).unwrap()).unwrap();
@@ -164,8 +164,8 @@ fn run_live(binary: Arc<backend::Assets>, routing_extension: bool) {
             .json()
             .unwrap();
         assert_eq!(response["result"], "Headers");
-        assert!(response["X-Apple-I-MD-M"] == first["X-Apple-I-MD-M"]);
-        assert!(response["X-Apple-I-MD-RINFO"] == first["X-Apple-I-MD-RINFO"]);
+        assert_eq!(response["X-Apple-I-MD-M"], first["X-Apple-I-MD-M"]);
+        assert_eq!(response["X-Apple-I-MD-RINFO"], first["X-Apple-I-MD-RINFO"]);
     }
     let bad = client
         .post(format!("{}/v3/get_headers", server.url))
@@ -230,15 +230,15 @@ fn run_live(binary: Arc<backend::Assets>, routing_extension: bool) {
             .json()
             .unwrap();
         assert_eq!(response["result"], "Headers");
-        assert!(
+        assert_eq!(
             response["X-Apple-I-MD-RINFO"]
                 .as_str()
-                .and_then(|s| s.parse::<u64>().ok())
-                == Some(if routing_extension {
-                    finish.routing
-                } else {
-                    17106176
-                })
+                .and_then(|s| s.parse::<u64>().ok()),
+            Some(if routing_extension {
+                finish.routing
+            } else {
+                17106176
+            })
         );
     }
     drop(server);

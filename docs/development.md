@@ -1,6 +1,12 @@
 # Development and validation
 
-Use this guide to check code changes or validate real backends. For installation, see [running locally](operations.md#running-locally).
+Use this guide to build, lint, test, and verify the workspace. For local prerequisites and binary preparation, see [Running locally](operations.md#running-locally) and [Asset preparation](../assets/README.md).
+
+## Prerequisites
+
+- Rust `1.95.0` (pinned in `rust-toolchain.toml`)
+- CMake, Ninja (`ninja-build`), a C/C++ compiler, and `libclang` (required to compile `unicorn-engine-sys`)
+- `7z` (`p7zip-full`) when extracting the Windows `CoreADI.dll` from the iTunes installer locally
 
 ## Offline checks
 
@@ -8,84 +14,69 @@ Use this guide to check code changes or validate real backends. For installation
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-targets --all-features --locked
-RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --all-features --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
 ```
 
-Offline tests require no Apple files or external network access. They require a host that permits Unicorn JIT and loopback sockets. A sandbox that denies JIT can cause SIGILL; run emulator tests in a JIT-capable environment. Ignored tests do not count as successful real-backend validation.
+Offline tests run without Apple binaries or external network access. They require a host environment that allows Unicorn JIT mappings and loopback sockets.
 
-Session tests use a fake backend to verify ordering, cancellation, cleanup, and error redaction. The WebSocket transport test uses a stub worker to verify connection and channel lifetimes. Neither validates native ADI execution, Apple provisioning, or usable OTPs. Report offline checks and real-backend results separately; a green offline suite is not evidence that a backend works. Keep tests that exercise production behavior or a regression; avoid assertions that merely read back hardcoded fixture output or repeat another test's coverage.
-
-Tests cover protocol encoding and limits, session ordering and cancellation, WebSocket success/timeouts/disconnection/shutdown, worker capacity retention after request timeouts, private state permissions/locking/atomic saves, invalid-state rejection, binary parser bounds, and emulator memory/file/execution limits. Fixtures must contain only synthetic data, never real device secrets or Apple binaries.
+The offline suite covers:
+- Base64/JSON protocol parsing, bounds, and error redaction
+- Provisioning session state machine ordering and cancellation
+- HTTP method routing (`GET /`, `GET, HEAD /v3/client_info`, `POST /v3/get_headers`), body timeouts, and WebSocket `Origin` rejection
+- WebSocket handshake timeouts, disconnection, and graceful shutdown
+- Private state directory permissions (`0700`/`0600`), flock exclusion, and atomic saves
+- ELF, Mach-O, and PE loader bounds and segment overlap checks
+- Guest heap allocation, W^X memory protection, TLS slot reuse, and instruction/time limits
 
 ## Real-backend validation
 
-Supply all three pinned binary paths explicitly:
+With all three pinned Apple binaries prepared locally, run the full live test suite against Apple's provisioning endpoints:
 
 ```sh
-ANISETTE_ANDROID_LIBS=/path/to/android-libraries \
-ANISETTE_MACOS_BINARY=/path/to/CoreADI-26.x86_64 \
-ANISETTE_WINDOWS_BINARY=/path/to/CoreADI.dll \
+ANISETTE_ANDROID_LIBS=./assets/local/android-4.9.6 \
+ANISETTE_MACOS_BINARY=./assets/local/CoreADI-26.x86_64 \
+ANISETTE_WINDOWS_BINARY=./assets/local/CoreADI.dll \
   sh scripts/verify-backends.sh
 ```
 
-The script rejects missing variables or files and runs the ignored tests. These tests contact Apple to register independent temporary devices, require Unicorn JIT, and do not log into accounts or print secrets. Temporary service identities are deleted automatically.
-
-The service tests cover V1 requests and restart, stable device identity/MID, repeated V3 snapshot restoration, WebSocket provisioning, request/session limits, and lock release on shutdown. Android uses standard V3 messages; macOS/Windows use the routing extension. Backend tests also check cancellation followed by another provisioning attempt and rejection of missing routing after native completion.
-
-### Run one backend
-
-To run one service test:
+To run a single backend's live integration test:
 
 ```sh
-ANISETTE_ANDROID_LIBS=/path/to/android-libraries \
+ANISETTE_ANDROID_LIBS=./assets/local/android-4.9.6 \
   cargo test -p anisette-server live_android_http_restart_and_standard_v3 -- --ignored
-ANISETTE_MACOS_BINARY=/path/to/CoreADI-26.x86_64 \
+ANISETTE_MACOS_BINARY=./assets/local/CoreADI-26.x86_64 \
   cargo test -p anisette-server live_http_restart_v3_restore_and_extended_provisioning -- --ignored
-ANISETTE_WINDOWS_BINARY=/path/to/CoreADI.dll \
+ANISETTE_WINDOWS_BINARY=./assets/local/CoreADI.dll \
   cargo test -p anisette-server live_windows_http_restart_and_extended_v3 -- --ignored
 ```
 
-### Check binaries without Apple network access
+### Offline binary load checks
 
-For local binary checks without contacting Apple:
+To verify binary loading and VM initialization locally without contacting Apple:
 
 ```sh
-cargo run -p adi-macos --example inspect -- /path/to/CoreADI-26.x86_64
-ANISETTE_MACOS_BINARY=/path/to/CoreADI-26.x86_64 \
+cargo run -p adi-android --example boot -- ./assets/local/android-4.9.6
+cargo run -p adi-macos --example inspect -- ./assets/local/CoreADI-26.x86_64
+ANISETTE_MACOS_BINARY=./assets/local/CoreADI-26.x86_64 \
   cargo test -p adi-macos --test binary -- --ignored
-ANISETTE_WINDOWS_BINARY=/path/to/CoreADI.dll \
+ANISETTE_WINDOWS_BINARY=./assets/local/CoreADI.dll \
   cargo test -p adi-windows --test binary -- --ignored
-cargo run -p adi-android --example boot -- /path/to/android-libraries
 ```
 
-Each backend also provides a `provision` example for an independent device-only check. These examples contact Apple and verify OTP/state restoration without persisting or printing secret material.
+## CI and container publishing
 
-For automatic provisioning, persistence, proxy settings, and TLS limits, see [operations](operations.md#device-state-and-restart).
+GitHub Actions (`.github/workflows/ci.yml`) runs formatting, Clippy, offline unit/integration tests, and rustdoc checks. On pushes to `main` and version tags (`v*`), native `linux/amd64` and `linux/arm64` runners build the Docker image using `cargo-chef`, run `--check` across all three backends with `--network none`, and publish the multi-arch manifest to `ghcr.io/fdkevin0/anisette-server-rs`.
 
-## CI and containers
-
-CI runs fmt, Clippy, offline tests, and rustdoc on Linux using `rust-toolchain.toml`, with Cargo dependency caching. Dependent image jobs build AMD64 and ARM64 on native Ubuntu runners in parallel, with separate GitHub Actions layer caches. Each job loads its image and runs `--check` for all three backends with `--network none` and an unwritable state path. On pushes, each checked image is uploaded under a unique `ci-<run>-<attempt>-<arch>` staging tag; a final job publishes the multi-platform manifest by digest only after both architectures pass. Staging tags may remain if another architecture fails. Pull requests build and test but never log in or publish. macOS and Windows host checks remain available locally.
-
-Pushes to `main` publish `ghcr.io/fdkevin0/anisette-server-rs:main` and `:latest`; version tags such as `v0.1.0` publish `:0.1.0`. `latest` tracks the latest successful main build; version tags do not move it. Each published build also receives a `sha-<short commit>` tag. Images target `linux/amd64` and `linux/arm64`; the existing `0.1.0` release remains AMD64-only. Publishing uses the repository's `GITHUB_TOKEN` with `packages: write`; no personal access token is required. The first package is private by default; change its visibility in GitHub package settings if anonymous pulls are needed.
-
-The Docker build uses cargo-chef 0.1.78 to cache release dependencies independently of source edits. The service and both resource importers compile together so their shared Unicorn dependency uses one feature set. Dependency cooking and the real build use the same Rust version, release profile, working directory, and package selection. Image jobs still wait for `check` to succeed to avoid spending build time on rejected changes.
-
-The Dockerfile and binary loaders enforce the pinned hashes. Container smoke checks do not register devices or verify Apple account authentication. See [operations](operations.md#docker) for runtime configuration.
-
-## Workspace
+## Workspace layout
 
 | Crate | Responsibility |
 | --- | --- |
-| anisette | Protocol types, provisioning state machine, Apple HTTPS exchange, shared emulator memory |
-| adi-android | Pinned Android ELF loading, ARM64 execution, ADI operations, APK import |
-| adi-macos | Pinned Mach-O loading, x86_64 execution, CF/XPC support, ADI state |
-| adi-windows | Pinned PE loading, x86_64 execution, bounded Win32 support, ADI state, installer extraction |
-| anisette-server | CLI, HTTP/WebSocket routes, bounded workers, private V1 persistence, shutdown |
-
-The toolchain is pinned to Rust 1.95.0. Building Unicorn requires CMake, a C/C++ compiler, and libclang. Use `Cargo.lock` for reproducible dependency resolution.
+| `anisette` | Shared V1/V3 protocol types, ADI wire constants, provisioning session state machine, Apple HTTPS client, and guest heap allocator |
+| `adi-android` | Pinned Android ELF loader, ARM64 Unicorn runtime, ADI operations, and APK importer |
+| `adi-macos` | Pinned Mach-O loader, `x86_64` Unicorn runtime, CoreFoundation/XPC stubs, and macOS state snapshot |
+| `adi-windows` | Pinned PE loader, `x86_64` Unicorn runtime, Win32 API subset, Windows state snapshot, and iTunes installer extractor |
+| `anisette-server` | CLI, Hyper HTTP/WebSocket server, bounded worker pools, and private V1 identity persistence |
 
 ## Lint policy
 
-Lints are defined in the root `Cargo.toml` under `[workspace.lints]`; each crate inherits them with `[lints] workspace = true`. Checks cover unsafe justifications, unsafe function bodies, unused return values, public fallible API `# Errors` documentation, locks/borrows across await, and rustdoc links. CI treats warnings as errors. Do not add `deny(warnings)` to source; use a narrowly scoped `#[expect(..., reason = "...")]` only for a genuine false positive.
-
-The default gate does not enable all of `pedantic`, `nursery`, or `restriction`. Optional review can use `cargo clippy --workspace --all-targets --all-features -- -W clippy::pedantic`. Emulator ABI bit patterns and fixed addresses must retain their meaning when addressing lints.
+Workspace-wide lints are configured in the root `Cargo.toml` under `[workspace.lints]` and inherited by every crate (`[lints] workspace = true`). They enforce `unsafe_op_in_unsafe_fn`, `undocumented_unsafe_blocks`, `missing_errors_doc`, `wildcard_imports`, `dbg_macro`, `todo`, and rustdoc link checks.

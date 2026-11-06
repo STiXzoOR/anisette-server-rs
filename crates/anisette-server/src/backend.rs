@@ -1,11 +1,11 @@
 use crate::store::{HeaderIdentity, Store};
 use anisette::provisioning;
 use anisette::{
-    protocol::{ClientInfo, DSID, Identifier, V1Headers},
+    protocol::{ClientInfo, DSID, Identifier, ServerMessage, V1Headers},
     session::ProvisioningContext,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{
     path::Path,
     sync::{Arc, mpsc},
@@ -15,6 +15,7 @@ use tokio::sync::oneshot;
 
 pub type Reply = Result<Value, &'static str>;
 pub type V1Request = oneshot::Sender<Reply>;
+#[derive(Debug)]
 pub struct V1Worker {
     pub sender: tokio::sync::mpsc::Sender<V1Request>,
     pub join: thread::JoinHandle<()>,
@@ -100,7 +101,8 @@ impl V1Worker {
                         Ok(value) => {
                             let _ = reply.send(Ok(value));
                         }
-                        Err(_) => {
+                        Err(e) => {
+                            eprintln!("V1 worker error: {e}");
                             let _ = reply
                                 .send(Err("V1 generation or persistence failed; restart required"));
                             // Never continue after state save or emulator failure with uncertain state.
@@ -137,14 +139,16 @@ pub fn headers(assets: &Assets, identifier: Identifier, bytes: &[u8]) -> Reply {
             return Err("missing routing".into());
         }
         let (mid, otp) = runtime.request_otp()?;
-        Ok(
-            json!({"result":"Headers", "X-Apple-I-MD":STANDARD.encode(otp),
-            "X-Apple-I-MD-M":STANDARD.encode(mid), "X-Apple-I-MD-RINFO":routing.to_string()}),
-        )
+        Ok(serde_json::to_value(ServerMessage::Headers {
+            otp: &STANDARD.encode(otp),
+            machine_id: &STANDARD.encode(mid),
+            routing: &routing.to_string(),
+        })?)
     })();
     result.map_err(|_| "state restoration or OTP generation failed")
 }
 
+#[derive(Debug)]
 pub struct Context {
     runtime: Device,
     identifier: [u8; 16],
@@ -178,7 +182,7 @@ impl ProvisioningContext for Context {
         // Native completion may populate routing; inspect it only after consuming the handle.
         let routing = match routing {
             Some(r) => r,
-            // shortcut: standard V3 omits Apple routing; preserve Dadoum's Android fallback until clients forward it.
+            // Standard V3 omits Apple routing; preserve Dadoum's Android fallback when unset.
             None if matches!(self.runtime, Device::Android(_)) => ANDROID_V3_ROUTING,
             None => self.runtime.routing()?,
         };
@@ -202,6 +206,7 @@ impl Drop for Context {
 
 const ANDROID_V3_ROUTING: u64 = 17106176;
 
+#[derive(Debug)]
 pub enum Assets {
     Macos(adi_macos::Binary),
     Android(adi_android::Libraries),
@@ -229,6 +234,7 @@ impl Assets {
         }
     }
 }
+#[derive(Debug)]
 enum Device {
     Macos(adi_macos::Runtime),
     Android(adi_android::Runtime),
@@ -351,7 +357,7 @@ impl Device {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Assets, Context, Device, Identifier, Path, ProvisioningContext, provisioning};
     #[test]
     #[ignore = "requires macOS/Windows binaries, Apple network and permitted Unicorn JIT"]
     fn live_missing_routing_checks_completed_native_state() {

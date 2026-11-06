@@ -9,7 +9,7 @@ mod stubs;
 mod xpc;
 pub use runtime::Runtime;
 
-use sha2::{Digest, Sha256};
+use anisette::protocol::verify_sha256;
 use std::{fs::File, io::Read, path::Path};
 
 pub use macho::{Bind, Image, Segment};
@@ -17,6 +17,7 @@ pub const BINARY_SHA256: &str = "4b6b320f08edcf5d65ed1141399b76a8d9323fee2045c57
 pub const MAX_BINARY_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     Io(std::io::Error),
     TooLarge,
@@ -51,6 +52,7 @@ impl std::error::Error for Error {
     }
 }
 
+#[derive(Debug)]
 pub struct Binary {
     bytes: Vec<u8>,
     image: Image,
@@ -79,20 +81,17 @@ impl Binary {
         if bytes.len() as u64 > MAX_BINARY_BYTES {
             return Err(Error::TooLarge);
         }
-        if Sha256::digest(&bytes)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>()
-            != BINARY_SHA256
-        {
+        if !verify_sha256(&bytes, BINARY_SHA256) {
             return Err(Error::UnknownBuild);
         }
         let image = Image::parse(&bytes)?;
         Ok(Self { bytes, image })
     }
+    #[must_use]
     pub fn image(&self) -> &Image {
         &self.image
     }
+    #[must_use]
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
@@ -104,6 +103,12 @@ impl From<unicorn_engine::unicorn_const::uc_error> for Error {
     }
 }
 
+impl From<anisette::memory::MemoryError> for Error {
+    fn from(e: anisette::memory::MemoryError) -> Self {
+        Self::Execution(e.as_str())
+    }
+}
+
 impl From<&'static str> for Error {
     fn from(message: &'static str) -> Self {
         Self::Execution(message)
@@ -112,7 +117,7 @@ impl From<&'static str> for Error {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Binary, Error, MAX_BINARY_BYTES};
     #[test]
     fn errors_preserve_causes_and_diagnostics() {
         use std::error::Error as _;

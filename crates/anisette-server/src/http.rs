@@ -1,6 +1,6 @@
 use crate::backend::{self, Assets, Context, V1Request};
 use anisette::{
-    protocol::{HeadersRequest, MAX_MESSAGE_BYTES, parse_message},
+    protocol::{HeadersRequest, MAX_MESSAGE_BYTES, ServerMessage, parse_message},
     session::Session,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -14,7 +14,7 @@ use hyper::{
     service::service_fn,
 };
 use hyper_util::rt::{TokioIo, TokioTimer};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{convert::Infallible, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -33,7 +33,7 @@ const CLIENT_WAIT: Duration = Duration::from_secs(3);
 const EXECUTION_WAIT: Duration = Duration::from_secs(35);
 type Command = (Vec<u8>, oneshot::Sender<Value>);
 type Response = HttpResponse<Full<Bytes>>;
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct App {
     pub assets: Arc<Assets>,
     pub v1: mpsc::Sender<V1Request>,
@@ -66,7 +66,7 @@ impl App {
 pub async fn serve(
     listener: TcpListener,
     app: App,
-    stop: watch::Sender<bool>,
+    _stop: watch::Sender<bool>,
 ) -> std::io::Result<()> {
     let mut stopping = app.stopping.clone();
     let mut connections = JoinSet::new();
@@ -75,24 +75,41 @@ pub async fn serve(
             break Ok(());
         }
         tokio::select! {
-            _=stopping.changed()=>break Ok(()),
-            Some(_)=connections.join_next(), if !connections.is_empty()=>{},
-            accepted=listener.accept()=>{
-                let (stream,_) = match accepted {Ok(v)=>v,Err(e)=>{let _=stop.send(true);break Err(e);}};
-                if connections.len()>=64 {continue;}
-                let app=app.clone();let mut stopping=stopping.clone();
+            _ = stopping.changed() => break Ok(()),
+            Some(_) = connections.join_next(), if !connections.is_empty() => {},
+            accepted = listener.accept() => {
+                let (stream, _) = match accepted {
+                    Ok(v) => v,
+                    Err(_) => {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        continue;
+                    }
+                };
+                if connections.len() >= 64 {
+                    continue;
+                }
+                let app = app.clone();
+                let mut stopping = stopping.clone();
                 connections.spawn(async move {
-                    let connection=http1::Builder::new().timer(TokioTimer::new())
-                        .header_read_timeout(Duration::from_secs(10)).max_headers(64)
-                        .serve_connection(TokioIo::new(stream),service_fn(move |request|handle(app.clone(),request)))
+                    let connection = http1::Builder::new()
+                        .timer(TokioTimer::new())
+                        .header_read_timeout(Duration::from_secs(10))
+                        .max_headers(64)
+                        .serve_connection(
+                            TokioIo::new(stream),
+                            service_fn(move |request| handle(app.clone(), request)),
+                        )
                         .with_upgrades();
                     tokio::pin!(connection);
                     if !*stopping.borrow() {
-                        tokio::select! {_=&mut connection=>return,_=stopping.changed()=>{}}
+                        tokio::select! {
+                            _ = &mut connection => return,
+                            _ = stopping.changed() => {}
+                        }
                     }
                     connection.as_mut().graceful_shutdown();
                     // A peer that stops reading must not hold process shutdown open.
-                    let _=tokio::time::timeout(Duration::from_secs(45),connection).await;
+                    let _ = tokio::time::timeout(Duration::from_secs(45), connection).await;
                 });
             }
         }
@@ -115,8 +132,11 @@ fn json(value: Value) -> Response {
     );
     response
 }
-fn failure(result: &'static str, message: &'static str) -> Response {
-    json(json!({"result":result,"message":message}))
+fn failure(message: &'static str) -> Response {
+    json(
+        serde_json::to_value(ServerMessage::GetHeadersError { message })
+            .expect("ServerMessage serializes"),
+    )
 }
 fn metadata(response: &mut Response) {
     response
@@ -142,22 +162,23 @@ async fn handle(app: App, request: Request<Incoming>) -> Result<Response, Infall
     Ok(response)
 }
 async fn route(app: App, request: Request<Incoming>) -> Response {
-    let get = request.method() == Method::GET || request.method() == Method::HEAD;
+    let get_or_head = request.method() == Method::GET || request.method() == Method::HEAD;
     let allowed = match request.uri().path() {
-        "/" if get => return v1(&app).await,
-        "/v3/client_info" if get => {
-            let profile = app.assets.profile();
+        "/" if request.method() == Method::GET => return v1(&app).await,
+        "/v3/client_info" if get_or_head => {
             return json(
-                json!({"client_info":profile.client_info,"user_agent":profile.user_agent}),
+                serde_json::to_value(app.assets.profile()).expect("ClientInfo serializes"),
             );
         }
         "/v3/get_headers" if request.method() == Method::POST => {
-            let bytes = match Limited::new(request.into_body(), MAX_MESSAGE_BYTES)
-                .collect()
-                .await
-            {
-                Ok(body) => body.to_bytes(),
-                Err(e) => {
+            let collected = tokio::time::timeout(
+                CLIENT_WAIT,
+                Limited::new(request.into_body(), MAX_MESSAGE_BYTES).collect(),
+            )
+            .await;
+            let bytes = match collected {
+                Ok(Ok(body)) => body.to_bytes(),
+                Ok(Err(e)) => {
                     return empty(
                         if e.downcast_ref::<http_body_util::LengthLimitError>()
                             .is_some()
@@ -168,14 +189,15 @@ async fn route(app: App, request: Request<Incoming>) -> Response {
                         },
                     );
                 }
+                Err(_) => return empty(StatusCode::REQUEST_TIMEOUT),
             };
             return headers(app, &bytes).await;
         }
         "/v3/provisioning_session" if request.method() == Method::GET => {
             return provision(app, request);
         }
-        "/" | "/v3/client_info" => "GET, HEAD",
-        "/v3/provisioning_session" => "GET",
+        "/" | "/v3/provisioning_session" => "GET",
+        "/v3/client_info" => "GET, HEAD",
         "/v3/get_headers" => "POST",
         _ => return empty(StatusCode::NOT_FOUND),
     };
@@ -193,7 +215,7 @@ async fn v1(app: &App) -> Response {
     match tokio::time::timeout(EXECUTION_WAIT, receive).await {
         Ok(Ok(Ok(value))) => json(value),
         _ => {
-            let mut response = failure("GetHeadersError", "V1 worker unavailable");
+            let mut response = failure("V1 worker unavailable");
             *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
             response
         }
@@ -216,7 +238,7 @@ fn decode_headers(
 async fn headers(app: App, bytes: &[u8]) -> Response {
     let (identifier, state) = match decode_headers(bytes) {
         Ok(v) => v,
-        Err(_) => return failure("GetHeadersError", "invalid identifier or state"),
+        Err(_) => return failure("invalid identifier or state"),
     };
     let Ok(permit) = app.headers.try_acquire_owned() else {
         return empty(StatusCode::SERVICE_UNAVAILABLE);
@@ -226,13 +248,13 @@ async fn headers(app: App, bytes: &[u8]) -> Response {
     });
     match tokio::time::timeout(EXECUTION_WAIT, task).await {
         Ok(Ok(Ok(value))) => json(value),
-        _ => failure(
-            "GetHeadersError",
-            "state restoration or OTP generation failed",
-        ),
+        _ => failure("state restoration or OTP generation failed"),
     }
 }
 fn upgrade_response<B>(request: &Request<B>) -> Result<Response, ()> {
+    if request.headers().contains_key(header::ORIGIN) {
+        return Err(());
+    }
     let key = request.headers().get("sec-websocket-key").ok_or(())?;
     if STANDARD.decode(key.as_bytes()).map_err(|_| ())?.len() != 16 {
         return Err(());
@@ -268,7 +290,7 @@ fn provision(app: App, mut request: Request<Incoming>) -> Response {
         .await;
         let (sender, mut receiver) = mpsc::channel::<Command>(1);
         let task = spawn_worker(permit, move || {
-            let mut session = Session::<Context>::default();
+            let mut session = Session::<Context>::new();
             while let Some((bytes, reply)) = receiver.blocking_recv() {
                 if reply.is_closed() {
                     break;
@@ -305,21 +327,29 @@ async fn conversation<S: AsyncRead + AsyncWrite + Unpin>(
     sender: mpsc::Sender<Command>,
     mut stopping: watch::Receiver<bool>,
 ) {
-    if *stopping.borrow() || !send(&mut socket, json!({"result":"GiveIdentifier"})).await {
+    if *stopping.borrow() || !send(&mut socket, Session::<Context>::initial_message()).await {
         return;
     }
+    let timeout_message =
+        serde_json::to_value(ServerMessage::Timeout).expect("ServerMessage serializes");
     loop {
         let input = tokio::select! {
-            _=stopping.changed()=>break,
-            input=tokio::time::timeout(CLIENT_WAIT,async {
-                loop {match socket.next().await {Some(Ok(Message::Ping(_)|Message::Pong(_)))=>continue,input=>return input}}
-            })=>input,
+            _ = stopping.changed() => break,
+            input = tokio::time::timeout(CLIENT_WAIT, async {
+                for _ in 0..16 {
+                    match socket.next().await {
+                        Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+                        input => return input,
+                    }
+                }
+                None
+            }) => input,
         };
         let bytes = match input {
             Ok(Some(Ok(Message::Text(s)))) => s.as_bytes().to_vec(),
             Ok(Some(Ok(Message::Binary(b)))) => b.to_vec(),
             Err(_) => {
-                send(&mut socket, json!({"result":"Timeout"})).await;
+                send(&mut socket, timeout_message).await;
                 break;
             }
             _ => break,
@@ -329,10 +359,13 @@ async fn conversation<S: AsyncRead + AsyncWrite + Unpin>(
             break;
         }
         let value = tokio::select! {
-            _=stopping.changed()=>break,
-            value=tokio::time::timeout(EXECUTION_WAIT,receive)=>match value {
-                Ok(Ok(value))=>value,
-                _=>{send(&mut socket,json!({"result":"Timeout"})).await;break;},
+            _ = stopping.changed() => break,
+            value = tokio::time::timeout(EXECUTION_WAIT, receive) => match value {
+                Ok(Ok(value)) => value,
+                _ => {
+                    send(&mut socket, timeout_message).await;
+                    break;
+                }
             },
         };
         let closed = !matches!(
@@ -356,7 +389,12 @@ async fn conversation<S: AsyncRead + AsyncWrite + Unpin>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        Arc, Command, Duration, HeaderValue, MAX_MESSAGE_BYTES, Request, Semaphore, StatusCode,
+        StreamExt, TcpListener, Value, conversation, decode_headers, header, json, metadata, mpsc,
+        spawn_worker, upgrade_response, watch, websocket_config,
+    };
+    use futures_util::SinkExt;
     use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
     #[tokio::test]
     async fn timed_out_request_keeps_capacity_until_worker_exits() {
@@ -419,7 +457,7 @@ mod tests {
                             let Some((_, reply)) = receiver.recv().await else {
                                 break;
                             };
-                            if reply.send(json!({"result":result})).is_err() {
+                            if reply.send(serde_json::json!({"result": result})).is_err() {
                                 break;
                             }
                         }
@@ -473,7 +511,7 @@ mod tests {
     }
     #[test]
     fn metadata_disables_caching_and_identifies_implementation() {
-        let mut response = json(json!({}));
+        let mut response = json(serde_json::json!({}));
         metadata(&mut response);
         assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
         assert!(
@@ -484,7 +522,7 @@ mod tests {
         );
     }
     #[test]
-    fn websocket_handshake_validates_key_and_protocol() {
+    fn websocket_handshake_validates_key_origin_and_protocol() {
         let mut request = Request::builder()
             .method("GET")
             .uri("/v3/provisioning_session")
@@ -500,6 +538,12 @@ mod tests {
             response.headers()["sec-websocket-accept"],
             "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
         );
+        request.headers_mut().insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://evil.example"),
+        );
+        assert!(upgrade_response(&request).is_err());
+        request.headers_mut().remove(header::ORIGIN);
         request
             .headers_mut()
             .insert("sec-websocket-key", HeaderValue::from_static("bad"));

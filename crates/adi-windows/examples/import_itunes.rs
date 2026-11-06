@@ -140,7 +140,7 @@ fn main() -> Result<()> {
 }
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::import;
     #[test]
     fn rejects_bad_input_without_extraction_or_overwrite() {
         let root = tempfile::tempdir().unwrap();

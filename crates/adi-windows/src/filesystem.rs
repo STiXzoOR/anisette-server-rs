@@ -90,9 +90,9 @@ impl FileSystem {
     pub fn file_id(&self, id: u64) -> Result<u64, Error> {
         use sha2::{Digest, Sha256};
         let h = self.handles.get(&id).ok_or("invalid file handle")?;
-        Ok(u64::from_le_bytes(
-            Sha256::digest(h.path.as_bytes())[..8].try_into().unwrap(),
-        ))
+        let digest = Sha256::digest(h.path.as_bytes());
+        let bytes: [u8; 8] = digest[..8].try_into().expect("SHA-256 has 32 bytes");
+        Ok(u64::from_le_bytes(bytes))
     }
     pub fn size(&self, id: u64) -> Result<usize, Error> {
         let h = self.handles.get(&id).ok_or("invalid file handle")?;
@@ -113,7 +113,8 @@ impl FileSystem {
         Ok(bytes[start..end].to_vec())
     }
     pub fn write(&mut self, id: u64, bytes: &[u8]) -> Result<(), Error> {
-        let h = self.handles.get(&id).ok_or("invalid file handle")?;
+        let total: usize = self.files.values().map(Vec::len).sum();
+        let h = self.handles.get_mut(&id).ok_or("invalid file handle")?;
         if h.access & 0x40000000 == 0 {
             return Err("file not writable".into());
         }
@@ -122,12 +123,10 @@ impl FileSystem {
             .checked_add(bytes.len())
             .filter(|n| *n <= MAX_FILE)
             .ok_or("file too large")?;
-        let total: usize = self.files.values().map(Vec::len).sum();
-        if total + end.saturating_sub(self.files[&h.path].len()) > 4 * MAX_FILE {
+        let file = self.files.get_mut(&h.path).ok_or("invalid file handle")?;
+        if total + end.saturating_sub(file.len()) > 4 * MAX_FILE {
             return Err("file aggregate limit".into());
         }
-        let h = self.handles.get_mut(&id).unwrap();
-        let file = self.files.get_mut(&h.path).unwrap();
         file.resize(file.len().max(end), 0);
         file[h.offset..end].copy_from_slice(bytes);
         h.offset = end;
@@ -148,15 +147,16 @@ impl FileSystem {
         Ok(h.offset)
     }
     pub fn truncate(&mut self, id: u64) -> Result<(), Error> {
+        let total: usize = self.files.values().map(Vec::len).sum();
         let h = self.handles.get(&id).ok_or("invalid file handle")?;
         if h.access & 0x40000000 == 0 {
             return Err("file not writable".into());
         }
-        let total: usize = self.files.values().map(Vec::len).sum();
-        if total + h.offset.saturating_sub(self.files[&h.path].len()) > 4 * MAX_FILE {
+        let file = self.files.get_mut(&h.path).ok_or("invalid file handle")?;
+        if total + h.offset.saturating_sub(file.len()) > 4 * MAX_FILE {
             return Err("file aggregate limit".into());
         }
-        self.files.get_mut(&h.path).unwrap().resize(h.offset, 0);
+        file.resize(h.offset, 0);
         Ok(())
     }
     pub fn delete(&mut self, path: &str) -> Result<(), u32> {
@@ -171,7 +171,7 @@ impl FileSystem {
 }
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{FileSystem, MAX_FILE, ROOT};
     #[test]
     fn private_paths_handles_offsets_sharing_and_limits() {
         let mut fs = FileSystem::default();

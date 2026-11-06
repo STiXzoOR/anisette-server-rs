@@ -2,7 +2,7 @@
 // Daemon XPC/CF contract adapted from os-findmy-e macOS-ADI-emulator/adi.py and stubs.py.
 use crate::{
     Error,
-    runtime::{Cpu, argument as arg},
+    runtime::{Cpu, argument as arg, read_u64},
     stubs::cstr,
 };
 use std::collections::BTreeMap;
@@ -28,11 +28,7 @@ fn cell(cpu: &Cpu<'_>, name: &str) -> Result<u64, Error> {
         .ok_or(Error::Execution("missing data import"))
 }
 fn value(cpu: &Cpu<'_>, name: &str) -> Result<u64, Error> {
-    Ok(u64::from_le_bytes(
-        cpu.mem_read_as_vec(cell(cpu, name)?, 8)?
-            .try_into()
-            .unwrap(),
-    ))
+    read_u64(cpu, cell(cpu, name)?)
 }
 fn dictionary<'a>(cpu: &'a Cpu<'_>, p: u64) -> Result<&'a BTreeMap<String, Vec<u8>>, Error> {
     match cpu.get_data().objects.get(&p) {
@@ -179,8 +175,10 @@ pub(crate) fn call(cpu: &mut Cpu<'_>, name: &str) -> Result<Option<u64>, Error> 
         }
         "SecTaskCreateWithAuditToken" => cpu.get_data_mut().object(32)?,
         "SecTaskCopyValueForEntitlement" => {
-            if matches!(cpu.get_data().objects.get(&b),Some(Object::String(s)) if s=="adi-client" || s=="com.apple.private.adid")
-            {
+            if matches!(
+                cpu.get_data().objects.get(&b),
+                Some(Object::String(s)) if s == "adi-client" || s == "com.apple.private.adid"
+            ) {
                 object(cpu, Object::String("1".into()))?
             } else {
                 value(cpu, "kCFBooleanTrue")?

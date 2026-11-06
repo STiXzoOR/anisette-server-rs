@@ -1,13 +1,97 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
-use std::fmt;
+use sha2::{Digest, Sha256};
+use std::{collections::BTreeMap, fmt};
 
 pub const DSID: i64 = -2;
+pub const ADI_ERR_NOT_PROVISIONED: i32 = -45061;
+pub const OP_IS_PROVISIONED: u32 = 0xb0eda7af;
+pub const OP_START_PROVISIONING: u32 = 0x716bd86c;
+pub const OP_FINISH_PROVISIONING: u32 = 0x0b2b3196;
+pub const OP_CANCEL_PROVISIONING: u32 = 0x55a637c0;
+pub const OP_REQUEST_OTP: u32 = 0xcfe0b46a;
+pub const OP_SET_ROUTING: u32 = 0x632b8d6e;
+pub const OP_GET_ROUTING: u32 = 0x85fe63b0;
+pub const OP_FREE: u32 = 0x3e58e7f9;
 pub const MAX_STATE_BYTES: usize = 3 * 1024 * 1024;
 /// Allows a maximum Base64 state plus 4 KiB for JSON and protocol fields.
 pub const MAX_MESSAGE_BYTES: usize = MAX_STATE_BYTES.div_ceil(3) * 4 + 4096;
 
+/// Verifies that `bytes` match an expected lowercase hex SHA-256 digest.
+#[must_use]
+pub fn verify_sha256(bytes: &[u8], expected_hex: &str) -> bool {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>()
+        == expected_hex
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StateSnapshot {
+    pub provider: String,
+    pub version: u32,
+    pub binary_sha256: String,
+    pub identifier: [u8; 16],
+    pub host_uuid: [u8; 16],
+    pub files: BTreeMap<String, String>,
+}
+
+impl StateSnapshot {
+    /// Serializes a backend state envelope and enforces [`MAX_STATE_BYTES`].
+    ///
+    /// # Errors
+    /// Returns an error if serialization fails or the output exceeds [`MAX_STATE_BYTES`].
+    pub fn encode(
+        provider: &str,
+        binary_sha256: &str,
+        identifier: [u8; 16],
+        host_uuid: [u8; 16],
+        files: BTreeMap<String, String>,
+    ) -> Result<Vec<u8>, &'static str> {
+        let state = Self {
+            provider: provider.into(),
+            version: 1,
+            binary_sha256: binary_sha256.into(),
+            identifier,
+            host_uuid,
+            files,
+        };
+        let bytes = serde_json::to_vec(&state).map_err(|_| "state serialization failed")?;
+        if bytes.len() > MAX_STATE_BYTES {
+            return Err("state too large");
+        }
+        Ok(bytes)
+    }
+
+    /// Parses and validates a backend state envelope against the expected provider, binary hash, and identity.
+    ///
+    /// # Errors
+    /// Returns an error if the snapshot exceeds [`MAX_STATE_BYTES`], is malformed JSON, or mismatches metadata.
+    pub fn decode(
+        bytes: &[u8],
+        provider: &str,
+        binary_sha256: &str,
+        identifier: [u8; 16],
+    ) -> Result<Self, &'static str> {
+        if bytes.len() > MAX_STATE_BYTES {
+            return Err("state too large");
+        }
+        let state: Self = serde_json::from_slice(bytes).map_err(|_| "invalid state snapshot")?;
+        if state.provider != provider
+            || state.version != 1
+            || state.binary_sha256 != binary_sha256
+            || state.identifier != identifier
+        {
+            return Err("state backend, version, binary or identity mismatch");
+        }
+        Ok(state)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum InputError {
     TooLarge,
     InvalidJson,
@@ -60,11 +144,17 @@ pub fn decode_binary(encoded: &str, max_bytes: usize) -> Result<Vec<u8>, InputEr
     Ok(bytes)
 }
 
-// No Debug: avoid accidentally logging device identities.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Identifier([u8; 16]);
 
+impl fmt::Debug for Identifier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Identifier([redacted])")
+    }
+}
+
 impl Identifier {
+    #[must_use]
     pub fn from_bytes(bytes: [u8; 16]) -> Self {
         Self(bytes)
     }
@@ -96,6 +186,7 @@ impl Identifier {
         Ok(Self(bytes))
     }
 
+    #[must_use]
     pub fn bytes(&self) -> [u8; 16] {
         self.0
     }
@@ -112,6 +203,7 @@ impl Identifier {
         ))
     }
 
+    #[must_use]
     pub fn uuid(&self) -> String {
         let b = self.0;
         format!(
@@ -136,20 +228,21 @@ impl Identifier {
     }
 
     /// Dadoum's Android mapping; not a mapping for macOS or Windows identities.
+    #[must_use]
     pub fn android_adi_identifier(&self) -> String {
         self.uuid()[..16].to_owned()
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct IdentifierMessage {
     pub identifier: String,
 }
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct StartMessage {
     pub spim: String,
 }
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct EndMessage {
     pub ptm: String,
     pub tk: String,
@@ -177,7 +270,7 @@ fn routing<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Err
     }
     Ok(Some(value))
 }
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct HeadersRequest {
     pub identifier: String,
     pub adi_pb: String,
@@ -196,13 +289,13 @@ impl HeadersRequest {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Copy, Debug, Serialize)]
 pub struct ClientInfo<'a> {
     pub client_info: &'a str,
     pub user_agent: &'a str,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Copy, Debug, Serialize)]
 #[serde(tag = "result")]
 pub enum ServerMessage<'a> {
     GiveIdentifier,
@@ -236,7 +329,7 @@ pub enum ServerMessage<'a> {
 
 /// V1 names preserve the exact JSON casing consumed by existing clients.
 /// Identity/profile values must come from the actual backend, never the host OS.
-#[derive(Serialize)]
+#[derive(Clone, Copy, Debug, Serialize)]
 pub struct V1Headers<'a> {
     #[serde(rename = "X-Apple-I-MD")]
     pub otp: &'a str,

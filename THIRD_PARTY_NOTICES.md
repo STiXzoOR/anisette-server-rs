@@ -1,33 +1,25 @@
 # Third-party notices
 
-No Apple binaries are committed to the source repository. Docker builds download and bundle the verified Android and Windows libraries from Apple packages; the same image also bundles the backend author-provided adid. These files retain their own terms. The macOS parser includes adapted upstream code as documented below. Protocol behavior was checked against the commits in docs/upstream.md.
+Repository source code is licensed under `GPL-2.0-only` (see [LICENSE](LICENSE)). No Apple binaries are committed to the source repository; Docker builds download and verify pinned Apple binaries at build time, and those files remain subject to their own distribution terms. Full Rust dependency licenses are listed in [docs/licenses.md](docs/licenses.md), and upstream commit references are recorded in [docs/upstream.md](docs/upstream.md).
 
-Repository source is GPL-2.0-only (see LICENSE); workspace crates are publish=false. The dependency inventory and distribution requirements are recorded in [docs/licenses.md](docs/licenses.md). The macOS emulator source explicitly specifies GPL-2.0-only; its adapted code retains that license.
+## macOS backend (`crates/adi-macos` and `crates/anisette/src/memory.rs`)
 
-Current Rust dependencies are recorded exactly in Cargo.lock. base64: MIT OR Apache-2.0; serde/serde_json: MIT OR Apache-2.0; clap: MIT OR Apache-2.0 (check transitive package notices before distribution). Apple files remain subject to their own terms and are not covered by any repository license.
+- `crates/adi-macos/src/macho.rs` is adapted from [sacca97/os-findmy-e](https://github.com/sacca97/os-findmy-e/tree/d4d2a832baf47d1cf43d989879950ac2aec45f47) (`native/adi-core/src/macho.rs`), Copyright (c) 2026 sacca, licensed under `GPL-2.0-only` (see `crates/adi-macos/LICENSE`).
+- The guest heap allocator (`crates/anisette/src/memory.rs`), CoreADI dispatcher framing (`crates/adi-macos/src/adi.rs`), and macOS daemon/CoreFoundation/XPC stub models (`crates/adi-macos/src/{filesystem,runtime,stubs,xpc}.rs`) are adapted from `os-findmy-e`'s `macOS-ADI-emulator` (`harness.py`, `adi.py`, and `stubs.py`), Copyright (c) 2026 sacca, `GPL-2.0-only`.
 
-## macOS backend
+## Android backend (`crates/adi-android`)
 
-`crates/adi-macos/src/macho.rs` is adapted from sacca97/os-findmy-e at `d4d2a832baf47d1cf43d989879950ac2aec45f47`, native/adi-core/src/macho.rs, with executable parsing and bounds validation changes. Copyright (c) 2026 sacca. The adi-macos crate is GPL-2.0-only; the full license is at crates/adi-macos/LICENSE. sha2 is MIT OR Apache-2.0; choose its MIT alternative for GPL-2.0-only distribution. Any binary distribution must include the corresponding source and applicable notices.
+- `crates/adi-android/src/runtime.rs` adapts the ARM64 Unicorn memory layout and symbol hook behavior from [malmeloo/Anisette.py](https://github.com/malmeloo/Anisette.py/tree/627c9c663062bd872182b653113759c9d66b7e13) (`src/anisette/vm/_vm.py` and `_hooks.py`). Its MIT copyright and permission notice is preserved in `crates/adi-android/LICENSE-MIT-Anisette.py`.
+- The ADI dispatcher framing and shared allocator follow the `GPL-2.0-only` `os-findmy-e` reference; the combined crate is licensed under `GPL-2.0-only` (`crates/adi-android/LICENSE`).
 
-The memory allocator/runtime layout and daemon startup import models in `anisette/src/memory.rs` and `adi-macos/src/runtime.rs` are adapted from the same fixed os-findmy-e macOS-ADI-emulator `harness.py` and `adi.py`, GPL-2.0-only, copyright (c) 2026 sacca. Execution limits, fail-closed import handling and allocator checks are local implementations. `unicorn-engine`/`unicorn-engine-sys` 2.1.5 are GPL-2.0; getrandom 0.4 uses its MIT alternative. The Docker build downloads the executable from the backend author's reference link and verifies its pinned hash. Apple executable bytes are not covered by the emulator's GPL license.
+## Windows backend (`crates/adi-windows`)
 
-`adi-macos/src/{filesystem,stubs,xpc}.rs` additionally adapt the same reference's `stubs.py` and `adi.py`, retaining GPL-2.0-only. Bounds, filesystem limits, input validation, error propagation and strict unsupported-operation handling are local changes.
+- `crates/adi-windows` uses a locally authored PE loader and bounded Win64 API shim together with the `GPL-2.0-only` `os-findmy-e` ADI dispatcher framing and shared guest allocator (`crates/adi-windows/LICENSE`).
 
-`adi-macos/src/adi.rs` adapts the same GPL-2.0-only ADI wire-operation reference. The service performs Apple provisioning with reqwest, rustls, and plist/time in Rust. The production HTTP service uses Hyper/Tokio/Tungstenite. Reqwest and its TLS dependencies (including AWS-LC in reqwest 0.13) are runtime dependencies as well as integration-test dependencies; their licenses are included in the inventory. Build-only clang-sys is also recorded in docs/licenses.md. The importer enables only the required ZIP decoder.
+## Protocol references
 
-## Android and shared code
-
-`adi-android/src/runtime.rs` implements the fixed ELF runtime/import behavior using malmeloo/Anisette.py at `627c9c663062bd872182b653113759c9d66b7e13`, especially `src/anisette/vm/_vm.py` and `_hooks.py`. Its MIT copyright and permission notice is retained in `crates/adi-android/LICENSE-MIT-Anisette.py`. The dispatcher frame also follows the GPL-2.0-only os-findmy-e native ADI reference; the combined crate retains GPL-2.0-only at `crates/adi-android/LICENSE`.
-
-`anisette/src/memory.rs` retains the GPL-2.0-only attribution documented above; the shared crate has a full LICENSE copy. `goblin` and `zip` are MIT.
-
-The lockfile includes target-specific, optional, build and example dependencies as well as linked runtime dependencies. Their presence alone does not establish what a specific binary distributes. No release compatibility conclusion is asserted by the SPDX summaries above.
-
-## Windows backend
-
-`adi-windows` uses locally authored PE loading and a bounded Win64 API subset, plus the GPL-2.0-only os-findmy-e dispatcher framing and shared allocator. Its full GPL-2.0-only license is retained. Apple DLL bytes are extracted from the official iTunes installer and bundled by the Docker build. No Wine, Perun, Blackwood or unlicensed apple-crates implementation code is included.
+- V1 and V3 HTTP/WebSocket semantics follow [Dadoum/anisette-v3-server](https://github.com/Dadoum/anisette-v3-server/tree/684895737aaf1a1c4586fcd5b67509ffd500a36c) (`source/app.d`, protocol reference only; no code imported) and [SideStore/apple-private-apis](https://github.com/SideStore/apple-private-apis/tree/03beb1aa42991ccdad6214dee77e72282bef461f) (`omnisette/src/remote_anisette_v3.rs`, MPL-2.0, protocol reference only).
 
 ## Apple public root certificate
 
-`crates/anisette/apple-root-ca.pem` is Apple's public Apple Root CA certificate, downloaded from Apple PKI for provisioning TLS verification. Source and fingerprint are recorded in [docs/upstream.md](docs/upstream.md). It is not an ADI executable or device credential.
+- `crates/anisette/apple-root-ca.pem` is the public Apple Inc. Root CA certificate from [Apple PKI](https://www.apple.com/certificateauthority/) used for TLS verification of `https://gsa.apple.com`.

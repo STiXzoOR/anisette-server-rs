@@ -1,31 +1,27 @@
 # Compatibility
 
-The service exposes V1 and V3 through Android, macOS, and Windows ADI backends. Backend names identify the Apple binary being executed, not the host operating system. Unicorn executes the guest code on the host.
+`anisette-server-rs` exposes the V1 and V3 Anisette endpoints across three Apple ADI backends (`android`, `macos`, and `windows`). Backend names refer to the guest Apple binary executed inside Unicorn, not the host operating system.
 
-| Backend | Pinned guest | V1 | V3 provisioning | State |
+| Backend | Pinned guest binary | V1 (`GET /`) | V3 provisioning (`WS /v3/provisioning_session`) | `adi_pb` format |
 | --- | --- | --- | --- | --- |
-| Android | Apple Music 4.9.6.1447, ARM64 ELF | Server provisions and saves Apple routing | Standard messages supported; routing defaults to 17106176 unless the client supplies Apple's value | Raw adi.pb |
-| macOS | macOS 26.7.1 (25G241) x86_64 adid | Server provisions and saves Apple routing | Requires the Apple routing extension | macos-adid JSON envelope |
-| Windows | iTunes 12.13.12.3, CoreADI 4.17.0.0 x86_64 DLL | Server provisions and saves Apple routing | Requires the Apple routing extension | windows-coreadi JSON envelope |
+| `android` | Apple Music 4.9.6.1447 (`arm64-v8a` ELF) | Supported (saves Apple routing) | Standard V3 supported (`X-Apple-I-MD-RINFO` defaults to `17106176` if omitted) | Raw `adi.pb` bytes |
+| `macos` | macOS 26.7.1 (`25G241`) `x86_64` `adid` | Supported (saves Apple routing) | Requires `X-Apple-I-MD-RINFO` in the finish message | `macos-adid` JSON envelope |
+| `windows` | iTunes 12.13.12.3, `CoreADI.dll` 4.17.0.0 (`x86_64` PE) | Supported (saves Apple routing) | Requires `X-Apple-I-MD-RINFO` in the finish message | `windows-coreadi` JSON envelope |
 
-All four HTTP/WS routes are available for each backend. State is not interchangeable across backends. Only the exact binaries in the [manifests](../assets/manifests/README.md) are accepted.
+State snapshots (`adi_pb` and `identity.json`) are backend-specific and cannot be shared across backends. Loaders verify exact SHA-256 hashes from [assets/manifests](../assets/manifests/README.md) before parsing.
 
 ## Host support
 
-macOS ARM64 and Linux ARM64 support private state persistence and have real-backend coverage for provisioning, OTP, snapshot restoration, V1 restart, and the V3 behavior listed above. Windows-host private ACL storage is not implemented, so the server cannot run there. CI builds and offline tests on Windows do not establish Windows-host service support. Linux x86_64 and other host/architecture combinations lack real-backend validation.
+- **Linux (`x86_64` and `aarch64`) and macOS (`aarch64`)**: Full support for running the server and persisting private V1 state.
+- **Windows hosts**: Offline unit tests build and pass, but Unix-mode private state storage (`0700`/`0600`) is not implemented on Windows hosts; run the Linux container via Docker Desktop or WSL2 on Windows.
 
-The Windows backend executes through Unicorn without Wine or installed Windows software. It does not read the host registry or iCloud identity. The macOS and Android backends likewise use bounded emulated filesystems instead of host device state.
+All three backends execute inside isolated in-memory Unicorn VMs with virtual filesystems and do not access host Apple credentials, system registries, or Wine.
 
-## Protocol and identity limitations
+## V3 routing and HTTP profiles
 
-Standard V3 finish messages contain ptm/tk but no Apple routing header. The pinned macOS and Windows binaries return zero routing after these messages; a client must forward `X-Apple-I-MD-RINFO` from Apple's finish-provisioning response. An unmodified standard V3 client cannot provision new macOS/Windows devices. Android uses 17106176 when the field is absent; this fallback establishes protocol behavior, not Apple account acceptance. See the [protocol](protocol.md) for validation rules.
+- **V3 routing (`X-Apple-I-MD-RINFO`)**: Standard V3 finish-provisioning messages only send `ptm` and `tk`. While the Android ADI binary works with the standard `17106176` fallback when routing is omitted, the pinned macOS and Windows binaries return `rinfo = 0` unless the client forwards `X-Apple-I-MD-RINFO` from Apple's finish-provisioning response. Standard unmodified V3 clients should therefore use `--backend android`, whereas V1 (`GET /`) works with all three backends because the server performs the Apple HTTPS exchange directly.
+- **HTTP client profiles**: The `android` and `windows` backends emit the Windows iCloud client profile (`X-MMe-Client-Info` / `User-Agent`), while `macos` emits the macOS `MacBookPro16,2` profile.
 
-Android and Windows use the Windows HTTP client profile; macOS uses its macOS profile. A profile string does not change the ADI binary. V1 includes Client-Info and User-Agent, but clients may discard or override them. Callers are responsible for consistent identity selection across GSA, 2FA, loginDelegates, and CloudKit.
+## Emulator bounds
 
-Generating OTPs does not establish successful Apple account login, 2FA, token issuance, or CloudKit access. These account flows are outside this service and are not validated by device-only tests.
-
-## Emulator scope
-
-Each backend implements only the ABI and system-function subset needed by its pinned binary. Unknown imports and unsupported operations fail explicitly. The Win32 character-conversion subset, including partial output on failure, lacks native Windows differential validation; it is not a general Win32 implementation.
-
-Each native call is limited to 5 seconds or 50 million instructions. Failed emulator instances cannot be reused. State validation checks backend identity, format version, applicable binary hash, paths, and size limits. See [development](development.md) for executable checks and [operations](operations.md) for persistence and shutdown behavior.
+Each backend implements only the ABI, syscalls, and imported library functions required by its pinned binary; unknown imports fail immediately. Every native Unicorn call is bounded to 5 seconds and 50 million instructions on non-executable stack/heap mappings (`W^X`), and a faulted VM instance is never reused.

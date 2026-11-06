@@ -20,7 +20,7 @@ struct Record {
     headers: HeaderIdentity,
 }
 
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HeaderIdentity {
     pub device_id: String,
@@ -54,6 +54,7 @@ impl HeaderIdentity {
 }
 pub type LoadedState = ([u8; 16], Vec<u8>, HeaderIdentity);
 
+#[derive(Debug)]
 pub struct Store {
     directory: PathBuf,
     backend: &'static str,
@@ -198,7 +199,8 @@ impl Store {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::*;
+    use super::{HeaderIdentity, STANDARD, Store, fs};
+    use base64::Engine as _;
     use std::os::unix::fs::{PermissionsExt, symlink};
     fn headers() -> HeaderIdentity {
         HeaderIdentity {
@@ -285,7 +287,10 @@ mod tests {
         assert!(store.save([7; 16], b"", &headers()).is_err());
         drop(store);
         let store = Store::open(&path, "macos").unwrap();
-        assert!(store.load().unwrap().unwrap() == ([7; 16], b"second".to_vec(), headers()));
+        assert_eq!(
+            store.load().unwrap().unwrap(),
+            ([7; 16], b"second".to_vec(), headers())
+        );
         fs::write(path.join("identity.json"), b"invalid").unwrap();
         assert!(store.load().is_err());
         fs::remove_file(path.join("identity.json")).unwrap();

@@ -4,18 +4,18 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-license = "GPL-2.0-only"
+license.workspace = true
 
 [lints]
 workspace = true
 
 [dependencies]
 anisette = { path = "../anisette" }
-sha2 = "0.11"
-goblin = "0.10"
-unicorn-engine = { version = "=2.1.5", default-features = false, features = ["arch_aarch64"] }
-getrandom = "0.4"
+sha2.workspace = true
+goblin.workspace = true
+unicorn-engine = { workspace = true, features = ["arch_aarch64"] }
+getrandom.workspace = true
 
 [dev-dependencies]
-zip = { version = "9.1.3", default-features = false, features = ["deflate-flate2-zlib-rs"] }
-tempfile = "3"
+zip = { version = "9.4.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+tempfile.workspace = true

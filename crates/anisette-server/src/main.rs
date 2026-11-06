@@ -86,11 +86,14 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             "Listening on {}; macOS/Windows V3 require routing extension; Android standard V3 defaults to routing 17106176",
             listener.local_addr()?
         );
-        let server=http::serve(listener,app,stop.clone());
+        let server = http::serve(listener, app, stop.clone());
         tokio::pin!(server);
         tokio::select! {
-            result=&mut server=>result,
-            _=shutdown_signal()=>{let _=stop.send(true);server.await}
+            result = &mut server => result,
+            _ = shutdown_signal() => {
+                let _ = stop.send(true);
+                server.await
+            }
         }
     });
     drop(worker.sender);
@@ -118,7 +121,7 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Args, Backend, Parser, Path, SocketAddr};
 
     #[test]
     fn backend_selects_bundled_binary_unless_overridden() {

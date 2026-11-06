@@ -1,4 +1,5 @@
 //! Apple device provisioning over HTTPS. Never accepts Apple account credentials.
+use crate::protocol::decode_binary;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use plist::{Dictionary, Value};
 use reqwest::{
@@ -9,10 +10,16 @@ use reqwest::{
 };
 use sha2::{Digest, Sha256};
 use std::{
+    fmt,
     io::{Cursor, Read},
+    sync::LazyLock,
     time::Duration,
 };
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+const MAX_FIELD_BYTES: usize = 65536;
+static APPLE_ROOT_CA: LazyLock<Certificate> = LazyLock::new(|| {
+    Certificate::from_pem(include_bytes!("../apple-root-ca.pem")).expect("valid Apple Root CA PEM")
+});
 fn field<'a>(v: &'a Value, key: &str) -> Result<&'a Value> {
     v.as_dictionary()
         .and_then(|d| d.get(key))
@@ -82,6 +89,7 @@ fn post(client: &Client, url: url::Url, request: Dictionary, stage: &str) -> Res
     }
     Ok(response.clone())
 }
+#[must_use]
 pub fn local_user_id(identifier: [u8; 16]) -> String {
     Sha256::digest(identifier)
         .iter()
@@ -102,6 +110,16 @@ pub struct Exchange {
     client: Client,
     finish_url: url::Url,
 }
+
+impl fmt::Debug for Exchange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Exchange")
+            .field("finish_url", &self.finish_url)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug)]
 pub struct FinishData {
     pub ptm: Vec<u8>,
     pub tk: Vec<u8>,
@@ -137,9 +155,7 @@ impl Exchange {
         }
         // Apple's provisioning root is absent from common Linux trust stores.
         let client = Client::builder()
-            .tls_certs_merge([Certificate::from_pem(include_bytes!(
-                "../apple-root-ca.pem"
-            ))?])
+            .tls_certs_merge([APPLE_ROOT_CA.clone()])
             .default_headers(headers)
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(20))
@@ -157,7 +173,7 @@ impl Exchange {
             Dictionary::new(),
             "start provisioning",
         )?;
-        let spim = STANDARD.decode(string(&start, "spim")?)?;
+        let spim = decode_binary(string(&start, "spim")?, MAX_FIELD_BYTES)?;
         Ok((
             Self {
                 client,
@@ -171,7 +187,7 @@ impl Exchange {
     /// # Errors
     /// Returns an error for empty or oversized CPIM, transfer failures, rejected provisioning, or invalid completion fields.
     pub fn finish(self, cpim: &[u8]) -> Result<FinishData> {
-        if cpim.is_empty() || cpim.len() > 65536 {
+        if cpim.is_empty() || cpim.len() > MAX_FIELD_BYTES {
             return Err("invalid CPIM size".into());
         }
         let finish = post(
@@ -187,8 +203,8 @@ impl Exchange {
             .filter(|n| *n != 0)
             .ok_or("invalid routing")?;
         Ok(FinishData {
-            ptm: STANDARD.decode(string(&finish, "ptm")?)?,
-            tk: STANDARD.decode(string(&finish, "tk")?)?,
+            ptm: decode_binary(string(&finish, "ptm")?, MAX_FIELD_BYTES)?,
+            tk: decode_binary(string(&finish, "tk")?, MAX_FIELD_BYTES)?,
             routing,
         })
     }
@@ -196,7 +212,7 @@ impl Exchange {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Dictionary, Value, endpoint};
     #[test]
     fn lookup_cannot_redirect_provisioning_to_untrusted_endpoints() {
         for url in [

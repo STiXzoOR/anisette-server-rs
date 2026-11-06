@@ -1,9 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Wire operations adapted from os-findmy-e macOS-ADI-emulator/adi.py.
 use crate::{Error, Runtime};
+use anisette::protocol::{
+    ADI_ERR_NOT_PROVISIONED, OP_CANCEL_PROVISIONING, OP_FINISH_PROVISIONING, OP_GET_ROUTING,
+    OP_IS_PROVISIONED, OP_REQUEST_OTP, OP_SET_ROUTING, OP_START_PROVISIONING,
+};
 
+fn u32_be(input: &mut &[u8]) -> Result<u32, Error> {
+    let bytes = take(input, 4)?;
+    Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
 fn vector(input: &mut &[u8]) -> Result<Vec<u8>, Error> {
-    let size = u32::from_be_bytes(take(input, 4)?.try_into().unwrap()) as usize;
+    let size = u32_be(input)? as usize;
     Ok(take(input, size)?.to_vec())
 }
 fn take<'a>(input: &mut &'a [u8], n: usize) -> Result<&'a [u8], Error> {
@@ -34,9 +42,9 @@ impl Runtime {
     /// # Errors
     /// Returns an error if ADI reports an unexpected status or emulation fails.
     pub fn is_machine_provisioned(&mut self, dsid: i64) -> Result<bool, Error> {
-        match self.call(0xb0eda7af, &dsid.to_be_bytes())?.0 {
+        match self.call(OP_IS_PROVISIONED, &dsid.to_be_bytes())?.0 {
             0 => Ok(true),
-            -45061 => Ok(false),
+            ADI_ERR_NOT_PROVISIONED => Ok(false),
             status => Err(Error::Adi(status)),
         }
     }
@@ -47,10 +55,10 @@ impl Runtime {
     pub fn start_provisioning(&mut self, dsid: i64, spim: &[u8]) -> Result<(Vec<u8>, u32), Error> {
         let mut body = dsid.to_be_bytes().to_vec();
         push_vector(&mut body, spim)?;
-        let bytes = self.must(0x716bd86c, &body)?;
+        let bytes = self.must(OP_START_PROVISIONING, &body)?;
         let mut input = bytes.as_slice();
         let cpim = vector(&mut input)?;
-        let session = u32::from_be_bytes(take(&mut input, 4)?.try_into().unwrap());
+        let session = u32_be(&mut input)?;
         if cpim.is_empty() {
             return Err(Error::Execution("empty CPIM"));
         }
@@ -69,7 +77,7 @@ impl Runtime {
         let mut body = session.to_be_bytes().to_vec();
         push_vector(&mut body, ptm)?;
         push_vector(&mut body, tk)?;
-        self.must(0x0b2b3196, &body)?;
+        self.must(OP_FINISH_PROVISIONING, &body)?;
         Ok(())
     }
     /// Cancels a pending native provisioning session.
@@ -77,7 +85,7 @@ impl Runtime {
     /// # Errors
     /// Returns an error if ADI rejects the handle or emulation fails.
     pub fn cancel_provisioning(&mut self, session: u32) -> Result<(), Error> {
-        self.must(0x55a637c0, &session.to_be_bytes())?;
+        self.must(OP_CANCEL_PROVISIONING, &session.to_be_bytes())?;
         Ok(())
     }
     /// Stores a nonzero routing value in the native backend.
@@ -90,7 +98,7 @@ impl Runtime {
         }
         let mut body = dsid.to_be_bytes().to_vec();
         body.extend(routing.to_be_bytes());
-        self.must(0x632b8d6e, &body)?;
+        self.must(OP_SET_ROUTING, &body)?;
         Ok(())
     }
     /// Reads the routing value stored by the native backend.
@@ -98,7 +106,7 @@ impl Runtime {
     /// # Errors
     /// Returns an error if the dispatcher is unavailable, ADI rejects the request, the reply is invalid, or emulation fails.
     pub fn routing(&mut self, dsid: i64) -> Result<u64, Error> {
-        let bytes = self.must(0x85fe63b0, &dsid.to_be_bytes())?;
+        let bytes = self.must(OP_GET_ROUTING, &dsid.to_be_bytes())?;
         Ok(u64::from_be_bytes(bytes.as_slice().try_into().map_err(
             |_| Error::Execution("invalid routing response"),
         )?))
@@ -108,7 +116,7 @@ impl Runtime {
     /// # Errors
     /// Returns an error if ADI rejects the request, the reply is invalid, or emulation fails.
     pub fn request_otp(&mut self, dsid: i64) -> Result<(Vec<u8>, Vec<u8>), Error> {
-        let bytes = self.must(0xcfe0b46a, &dsid.to_be_bytes())?;
+        let bytes = self.must(OP_REQUEST_OTP, &dsid.to_be_bytes())?;
         let mut input = bytes.as_slice();
         let mid = vector(&mut input)?;
         let otp = vector(&mut input)?;
@@ -120,7 +128,7 @@ impl Runtime {
 }
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{push_vector, vector};
     #[test]
     fn binary_vectors_reject_truncation_and_oversize() {
         for b in [&b""[..], &b"\0\0\0\x05a"[..], &b"\xff\xff\xff\xff"[..]] {

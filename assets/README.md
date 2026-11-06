@@ -1,12 +1,18 @@
 # Apple binary assets
 
-Use this guide when running without Docker or inspecting pinned binaries. [Docker images](../docs/operations.md#docker) already bundle all three backends.
+Use this guide when running `anisette-server` directly on the host without Docker. [Published GHCR images](../README.md#quick-start-ghcr-container) already bundle all three verified backends.
 
-Apple ADI binaries are not committed to Git; local copies under `assets/local/` are ignored. All loaders enforce exact SHA-256 hashes before parsing. Versions and hashes live in the [manifests](manifests/README.md); tested behavior and host coverage live in [compatibility](../docs/compatibility.md).
+Apple ADI binaries are not committed to Git (`assets/local/` is ignored). Loaders verify exact SHA-256 digests before parsing; see [assets/manifests](manifests/README.md) for the pinned versions and hashes.
 
-## Android
+> [!IMPORTANT]
+> **What happens if upstream binary files change**:
+> - **Fail-closed verification**: All importers (`import_apk`, `import_itunes`), the `Dockerfile`, and the runtime loaders (`Libraries::open` / `Binary::open`) verify exact file sizes and SHA-256 digests *before* parsing ELF, Mach-O, or PE structures.
+> - **Mutable URLs (`applemusic.apk` and ShareBin)**: Because Apple's Android APK URL (`https://apps.mzstatic.com/content/android-apple-music-apk/applemusic.apk`) is unversioned, if Apple publishes a newer APK at that URL, new `docker build` or `import_apk` runs will stop with a size/SHA-256 mismatch rather than executing an unverified binary or overwriting existing prepared files. Already-published GHCR images (`ghcr.io/fdkevin0/anisette-server-rs:latest` or release tags) bundle the verified libraries inside the image and remain unaffected.
+> - **Upgrading to a new binary build**: Because each backend binds to build-specific symbols, entry points, or obfuscated export names (and macOS/Windows `StateSnapshot` envelopes pin `binary_sha256`), supporting a newer Apple binary requires updating the pinned hashes, symbol/entry constants, and live-test verification together in code.
 
-The pinned build is Apple Music **4.9.6.1447**, ARM64 (`arm64-v8a`), recorded in [the manifest](manifests/android-4.9.6.json). The official URL is mutable; a different release must fail verification. Download explicitly with a bounded HTTPS-only command, then import on Linux/macOS:
+## Android (`applemusic.apk`)
+
+Pinned build: Apple Music **4.9.6.1447** (`arm64-v8a`), defined in [manifests/android-4.9.6.json](manifests/android-4.9.6.json).
 
 ```sh
 mkdir -p assets/local
@@ -18,13 +24,11 @@ cargo run -p adi-android --example import_apk -- \
   assets/local/applemusic.apk.part assets/local/android-4.9.6
 ```
 
-The importer requires a new destination. It verifies the entire APK before ZIP parsing, reads only the two fixed ARM64 entries, bounds and verifies their contents, checks ELF parsing, then publishes the temporary directory atomically. A failed download remains an unusable `.part` file; a failed import does not replace installed libraries. Windows directory publication is not supported by this preparation command.
+`import_apk` verifies the APK's SHA-256, extracts `libstoreservicescore.so` and `libCoreADI.so`, verifies their hashes and ELF structure, and atomically writes the output directory.
 
-## macOS
+## macOS (`CoreADI-26.x86_64`)
 
-The x86_64 adid slice is pinned to macOS 26.7.1 (25G241), SHA-256 `4b6b320f08edcf5d65ed1141399b76a8d9323fee2045c577c5d2f30f35a5dae1`. See [manifest](manifests/macos-26.json). No other build is accepted.
-
-The [backend author links this reference file](https://github.com/malmeloo/Anisette.py/pull/6) on ShareBin. This is a third-party host, not an Apple download endpoint. The download page requires an empty POST; GET returns HTML. The Docker build performs the download and verifies the pinned SHA-256 before including it. For local preparation:
+Pinned build: macOS 26.7.1 (`25G241`) `x86_64` `adid` slice, SHA-256 `4b6b320f08edcf5d65ed1141399b76a8d9323fee2045c577c5d2f30f35a5dae1` ([manifests/macos-26.json](manifests/macos-26.json)), referenced in [malmeloo/Anisette.py#6](https://github.com/malmeloo/Anisette.py/pull/6):
 
 ```sh
 mkdir -p assets/local
@@ -34,13 +38,11 @@ curl --disable --fail --location --proto '=https' --proto-redir '=https' \
 cargo run -p adi-macos --example inspect -- assets/local/CoreADI-26.x86_64
 ```
 
-A file extracted from a matching system is also accepted if it has the same hash.
+## Windows (`CoreADI.dll`)
 
-## Windows
+Pinned build: iTunes **12.13.12.3** `x86_64` `CoreADI.dll` 4.17.0.0 ([manifests/windows-itunes-12.13.12.3.json](manifests/windows-itunes-12.13.12.3.json)).
 
-The official iTunes 12.13.12.3 installer contains the pinned x86_64 CoreADI 4.17 DLL; see [manifest](manifests/windows-itunes-12.13.12.3.json). No third-party DLL download site is used. See [sources and provenance](../docs/upstream.md).
-
-Install `7z` as a preparation-only tool. The Rust importer verifies installer size/hash before extraction, copies the verified bytes to a private temporary directory, extracts only the fixed MSI and DLL entries with size/time limits, verifies the MSI and DLL hashes, and atomically creates a new output file. Existing output is never replaced.
+Install `7z` (`p7zip-full` on Debian/Ubuntu), download the official iTunes installer, and run `import_itunes`:
 
 ```sh
 mkdir -p assets/local
@@ -52,4 +54,4 @@ cargo run -p adi-windows --example import_itunes -- \
   assets/local/iTunes64Setup.exe.part assets/local/CoreADI.dll
 ```
 
-Neither the installer nor 7z is executed by the service. The Windows installer itself is never executed.
+`import_itunes` verifies the installer's SHA-256, extracts `iTunes64.msi` and `CoreADI.dll` in a temporary directory, verifies both hashes, and writes `assets/local/CoreADI.dll`.

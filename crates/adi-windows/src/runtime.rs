@@ -1,7 +1,16 @@
 mod state;
 use crate::{Binary, Error};
-use anisette::memory::Heap;
-use std::collections::{BTreeMap, BTreeSet};
+use anisette::{
+    memory::Heap,
+    protocol::{
+        ADI_ERR_NOT_PROVISIONED, DSID, OP_CANCEL_PROVISIONING, OP_FINISH_PROVISIONING, OP_FREE,
+        OP_GET_ROUTING, OP_IS_PROVISIONED, OP_REQUEST_OTP, OP_SET_ROUTING, OP_START_PROVISIONING,
+    },
+};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 use unicorn_engine::{
     RegisterX86 as Reg, Unicorn,
     unicorn_const::{Arch, Mode, Prot},
@@ -39,6 +48,13 @@ pub struct Runtime {
     dispatch: u64,
     poisoned: bool,
 }
+impl fmt::Debug for Runtime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Runtime")
+            .field("poisoned", &self.poisoned)
+            .finish_non_exhaustive()
+    }
+}
 impl Runtime {
     /// Creates a Windows emulator and runs the verified DLL attach entry point.
     ///
@@ -63,19 +79,20 @@ impl Runtime {
             fault: None,
         };
         let mut cpu = Unicorn::new_with_data(Arch::X86, Mode::MODE_64, env)?;
-        for (address, size) in [
-            (HEAP, HEAP_SIZE),
-            (STACK, STACK_SIZE),
-            (SCRATCH, 0x100000),
-            (IMPORT, 0x10000),
-            (RETURN, 4096),
-            (TEB, 0x10000),
-            (image.base, image.memory.len() as u64),
+        for (address, size, prot) in [
+            (HEAP, HEAP_SIZE, Prot::READ | Prot::WRITE),
+            (STACK, STACK_SIZE, Prot::READ | Prot::WRITE),
+            (SCRATCH, 0x100000, Prot::READ | Prot::WRITE),
+            (IMPORT, 0x10000, Prot::READ | Prot::WRITE),
+            (RETURN, 4096, Prot::READ | Prot::EXEC),
+            (TEB, 0x10000, Prot::READ | Prot::WRITE),
+            (image.base, image.memory.len() as u64, Prot::ALL),
         ] {
-            cpu.mem_map(address, size, Prot::ALL)?;
+            cpu.mem_map(address, size, prot)?;
         }
         cpu.mem_write(image.base, &image.memory)?;
         cpu.mem_write(IMPORT, &vec![0xc3; 0x10000])?;
+        cpu.mem_protect(IMPORT, 0x10000, Prot::READ | Prot::EXEC)?;
         cpu.reg_write(Reg::GS_BASE, TEB)?;
         cpu.mem_write(TEB + 8, &(STACK + STACK_SIZE).to_le_bytes())?;
         cpu.mem_write(TEB + 16, &STACK.to_le_bytes())?;
@@ -164,9 +181,9 @@ impl Runtime {
     /// # Errors
     /// Returns an error if ADI reports an unexpected status or emulation fails.
     pub fn is_provisioned(&mut self) -> Result<bool, Error> {
-        match self.operation(0xb0eda7af, &(-2i64).to_be_bytes())? {
+        match self.operation(OP_IS_PROVISIONED, &DSID.to_be_bytes())? {
             0 => Ok(true),
-            -45061 => Ok(false),
+            ADI_ERR_NOT_PROVISIONED => Ok(false),
             status => Err(Error::Adi(status)),
         }
     }
@@ -185,14 +202,13 @@ impl Runtime {
         self.cpu.mem_write(ptr, bytes)?;
         Ok(ptr)
     }
-    fn output(&self, cell: u64) -> Result<Vec<u8>, Error> {
+    fn output(&self, cell: u64) -> Result<(u64, Vec<u8>), Error> {
         let ptr = read_u64(&self.cpu, cell)?;
-        let len =
-            u32::from_le_bytes(self.cpu.mem_read_as_vec(cell + 8, 4)?.try_into().unwrap()) as usize;
+        let len = read_u32(&self.cpu, cell + 8)? as usize;
         if ptr == 0 || len == 0 || len > 65536 {
             return Err("invalid ADI output".into());
         }
-        Ok(self.cpu.mem_read_as_vec(ptr, len)?)
+        Ok((ptr, self.cpu.mem_read_as_vec(ptr, len)?))
     }
     /// Starts native provisioning and returns CPIM with its pending session handle.
     ///
@@ -202,17 +218,23 @@ impl Runtime {
         let ptr = self.input(0x10000, spim)?;
         let cells = SCRATCH + 0x40000;
         self.cpu.mem_write(cells, &[0; 24])?;
-        let mut body = (-2i64).to_be_bytes().to_vec();
+        let mut body = DSID.to_be_bytes().to_vec();
         body.extend(ptr.to_be_bytes());
         body.extend((spim.len() as u32).to_be_bytes());
         for p in [cells, cells + 8, cells + 16] {
             body.extend(p.to_be_bytes());
         }
-        self.checked(0x716bd86c, &body)?;
-        let cpim = self.output(cells)?;
-        let session =
-            u32::from_le_bytes(self.cpu.mem_read_as_vec(cells + 16, 4)?.try_into().unwrap());
-        Ok((cpim, session))
+        self.checked(OP_START_PROVISIONING, &body)?;
+        let session = read_u32(&self.cpu, cells + 16)?;
+        let result = (|| {
+            let (cpim_ptr, cpim) = self.output(cells)?;
+            self.checked(OP_FREE, &cpim_ptr.to_be_bytes())?;
+            Ok((cpim, session))
+        })();
+        if result.is_err() {
+            let _ = self.cancel_provisioning(session);
+        }
+        result
     }
     /// Completes the pending session using Apple provisioning data.
     ///
@@ -231,14 +253,14 @@ impl Runtime {
         body.extend((ptm.len() as u32).to_be_bytes());
         body.extend(tk_ptr.to_be_bytes());
         body.extend((tk.len() as u32).to_be_bytes());
-        self.checked(0x0b2b3196, &body)
+        self.checked(OP_FINISH_PROVISIONING, &body)
     }
     /// Cancels a pending native provisioning session.
     ///
     /// # Errors
     /// Returns an error if ADI rejects the handle or emulation fails.
     pub fn cancel_provisioning(&mut self, session: u32) -> Result<(), Error> {
-        self.checked(0x55a637c0, &session.to_be_bytes())
+        self.checked(OP_CANCEL_PROVISIONING, &session.to_be_bytes())
     }
     /// Returns the machine identifier and a fresh OTP without logging either.
     ///
@@ -247,15 +269,16 @@ impl Runtime {
     pub fn request_otp(&mut self) -> Result<(Vec<u8>, Vec<u8>), Error> {
         let cells = SCRATCH + 0x40000;
         self.cpu.mem_write(cells, &[0; 32])?;
-        let mut body = (-2i64).to_be_bytes().to_vec();
+        let mut body = DSID.to_be_bytes().to_vec();
         for p in [cells, cells + 8, cells + 16, cells + 24] {
             body.extend(p.to_be_bytes());
         }
-        self.checked(0xcfe0b46a, &body)?;
-        let result = (self.output(cells)?, self.output(cells + 16)?);
-        let ptr = read_u64(&self.cpu, cells)?;
-        self.checked(0x3e58e7f9, &ptr.to_be_bytes())?;
-        Ok(result)
+        self.checked(OP_REQUEST_OTP, &body)?;
+        let (mid_ptr, mid) = self.output(cells)?;
+        let (otp_ptr, otp) = self.output(cells + 16)?;
+        self.checked(OP_FREE, &mid_ptr.to_be_bytes())?;
+        self.checked(OP_FREE, &otp_ptr.to_be_bytes())?;
+        Ok((mid, otp))
     }
     /// Stores a nonzero routing value in the native backend.
     ///
@@ -265,9 +288,9 @@ impl Runtime {
         if routing == 0 {
             return Err("routing must not be zero".into());
         }
-        let mut body = (-2i64).to_be_bytes().to_vec();
+        let mut body = DSID.to_be_bytes().to_vec();
         body.extend(routing.to_be_bytes());
-        self.checked(0x632b8d6e, &body)
+        self.checked(OP_SET_ROUTING, &body)
     }
     /// Reads the routing value stored by the native backend.
     ///
@@ -276,9 +299,9 @@ impl Runtime {
     pub fn routing(&mut self) -> Result<u64, Error> {
         let cell = SCRATCH + 0x40000;
         self.cpu.mem_write(cell, &[0; 8])?;
-        let mut body = (-2i64).to_be_bytes().to_vec();
+        let mut body = DSID.to_be_bytes().to_vec();
         body.extend(cell.to_be_bytes());
-        self.checked(0x85fe63b0, &body)?;
+        self.checked(OP_GET_ROUTING, &body)?;
         read_u64(&self.cpu, cell)
     }
     fn operation(&mut self, code: u32, message: &[u8]) -> Result<i32, Error> {
@@ -298,15 +321,28 @@ impl Runtime {
         if status < 0 {
             return Err(Error::Adi(status));
         }
-        Ok(i32::from_be_bytes(
-            self.cpu.mem_read_as_vec(SCRATCH, 4)?.try_into().unwrap(),
-        ))
+        read_i32_be(&self.cpu, SCRATCH)
     }
 }
+fn read_u16(cpu: &Cpu<'_>, address: u64) -> Result<u16, Error> {
+    let mut bytes = [0u8; 2];
+    cpu.mem_read(address, &mut bytes)?;
+    Ok(u16::from_le_bytes(bytes))
+}
+fn read_u32(cpu: &Cpu<'_>, address: u64) -> Result<u32, Error> {
+    let mut bytes = [0u8; 4];
+    cpu.mem_read(address, &mut bytes)?;
+    Ok(u32::from_le_bytes(bytes))
+}
+fn read_i32_be(cpu: &Cpu<'_>, address: u64) -> Result<i32, Error> {
+    let mut bytes = [0u8; 4];
+    cpu.mem_read(address, &mut bytes)?;
+    Ok(i32::from_be_bytes(bytes))
+}
 fn read_u64(cpu: &Cpu<'_>, address: u64) -> Result<u64, Error> {
-    Ok(u64::from_le_bytes(
-        cpu.mem_read_as_vec(address, 8)?.try_into().unwrap(),
-    ))
+    let mut bytes = [0u8; 8];
+    cpu.mem_read(address, &mut bytes)?;
+    Ok(u64::from_le_bytes(bytes))
 }
 fn arg(cpu: &Cpu<'_>, index: usize) -> Result<u64, Error> {
     if index < 4 {
@@ -321,7 +357,7 @@ fn wide(cpu: &Cpu<'_>, address: u64) -> Result<String, Error> {
     }
     let mut chars = vec![];
     for i in 0..512 {
-        let c = u16::from_le_bytes(cpu.mem_read_as_vec(address + i * 2, 2)?.try_into().unwrap());
+        let c = read_u16(cpu, address + i * 2)?;
         if c == 0 {
             return String::from_utf16(&chars).map_err(|_| "invalid Windows string".into());
         }
@@ -480,7 +516,7 @@ fn import(cpu: &mut Cpu<'_>, name: &str) -> Result<u64, Error> {
         }
         "GetUserNameA" => {
             let name = b"anisette\0";
-            let capacity = u32::from_le_bytes(cpu.mem_read_as_vec(b, 4)?.try_into().unwrap());
+            let capacity = read_u32(cpu, b)?;
             cpu.mem_write(b, &(name.len() as u32).to_le_bytes())?;
             if capacity < name.len() as u32 {
                 cpu.get_data_mut().last_error = 122;
@@ -527,7 +563,7 @@ fn import(cpu: &mut Cpu<'_>, name: &str) -> Result<u64, Error> {
                 }
                 return Ok(0);
             }
-            let capacity = u32::from_le_bytes(cpu.mem_read_as_vec(size, 4)?.try_into().unwrap());
+            let capacity = read_u32(cpu, size)?;
             cpu.mem_write(size, &(bytes.len() as u32).to_le_bytes())?;
             if out != 0 {
                 if capacity < bytes.len() as u32 {
@@ -554,7 +590,8 @@ fn import(cpu: &mut Cpu<'_>, name: &str) -> Result<u64, Error> {
                     write_wide(cpu, ptr, value)?;
                 }
             }
-            let serial = u32::from_le_bytes(cpu.get_data().host_uuid[..4].try_into().unwrap());
+            let uuid = cpu.get_data().host_uuid;
+            let serial = u32::from_le_bytes([uuid[0], uuid[1], uuid[2], uuid[3]]);
             for (ptr, value) in [(d, serial), (arg(cpu, 4)?, 255), (arg(cpu, 5)?, 6)] {
                 if ptr != 0 {
                     cpu.mem_write(ptr, &value.to_le_bytes())?;
@@ -804,6 +841,10 @@ fn import(cpu: &mut Cpu<'_>, name: &str) -> Result<u64, Error> {
         "EnterCriticalSection" | "LeaveCriticalSection" | "DeleteCriticalSection" => Ok(0),
         "TlsAlloc" => {
             let slots = &mut cpu.get_data_mut().tls;
+            if let Some((index, slot)) = slots.iter_mut().enumerate().find(|(_, s)| s.is_none()) {
+                *slot = Some(0);
+                return Ok(index as u64);
+            }
             if slots.len() >= 64 {
                 return Err("Windows TLS slots exhausted".into());
             }
@@ -984,7 +1025,7 @@ fn import(cpu: &mut Cpu<'_>, name: &str) -> Result<u64, Error> {
             };
             let mut substituted = false;
             let output: Vec<u8> = if a == 65001 {
-                input.into_bytes()
+                input.as_bytes().to_vec()
             } else if a == 0 || a == 1252 {
                 input
                     .chars()
@@ -1002,13 +1043,11 @@ fn import(cpu: &mut Cpu<'_>, name: &str) -> Result<u64, Error> {
             let capacity = arg(cpu, 5)? as u32 as u64;
             if capacity != 0 {
                 if capacity < output.len() as u64 {
-                    let mut end = capacity as usize;
-                    if a == 65001 {
-                        while end > 0 && output[end] & 0xc0 == 0x80 {
-                            end -= 1;
-                        }
-                    }
-                    // shortcut: partial conversion calibrated only to this guest; verify on native Windows before release.
+                    let end = if a == 65001 {
+                        input.floor_char_boundary(capacity as usize)
+                    } else {
+                        capacity as usize
+                    };
                     cpu.mem_write(ptr, &output[..end])?;
                     cpu.get_data_mut().last_error = 122;
                     return Ok(0);
@@ -1026,8 +1065,7 @@ fn import(cpu: &mut Cpu<'_>, name: &str) -> Result<u64, Error> {
                 return Err("unsupported character type request".into());
             }
             for i in 0..c {
-                let raw =
-                    u16::from_le_bytes(cpu.mem_read_as_vec(b + i * 2, 2)?.try_into().unwrap());
+                let raw = read_u16(cpu, b + i * 2)?;
                 let ch = char::from_u32(raw as u32).ok_or("invalid codepoint")?;
                 let flags: u16 = u16::from(ch.is_uppercase())
                     | (u16::from(ch.is_lowercase()) << 1)
@@ -1072,7 +1110,7 @@ fn write_wide(cpu: &mut Cpu<'_>, ptr: u64, value: &str) -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{BTreeMap, Binary, Cpu, REGS, Reg, Runtime, SCRATCH, STACK, STACK_SIZE, import};
     fn artificial() -> Runtime {
         let base = 0x7c800000;
         let mut memory = vec![0; 4096];
@@ -1126,5 +1164,9 @@ mod tests {
             cpu.mem_read_as_vec(SCRATCH + 256, 4).unwrap(),
             [b'A', b'B', 0x55, 0x55]
         );
+        let slot = import(cpu, "TlsAlloc").unwrap();
+        arguments(cpu, &[slot]);
+        assert_eq!(import(cpu, "TlsFree").unwrap(), 1);
+        assert_eq!(import(cpu, "TlsAlloc").unwrap(), slot);
     }
 }

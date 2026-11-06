@@ -1,6 +1,7 @@
 use crate::Error;
 use std::collections::BTreeMap;
 
+#[derive(Debug)]
 pub(crate) struct Image {
     pub memory: Vec<u8>,
     pub base: u64,
@@ -87,7 +88,7 @@ impl Image {
 }
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::Image;
     #[test]
     fn malformed_images_fail_closed() {
         for bytes in [vec![], vec![0; 512], b"MZ".to_vec()] {

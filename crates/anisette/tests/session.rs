@@ -1,5 +1,8 @@
 //! State-machine tests with a fake backend; these do not validate Apple provisioning or OTPs.
-use anisette::{protocol::*, session::*};
+use anisette::{
+    protocol::{EndMessage, MAX_MESSAGE_BYTES},
+    session::{ProvisioningContext, Session},
+};
 use serde_json::{Value, json};
 use std::{cell::RefCell, rc::Rc};
 

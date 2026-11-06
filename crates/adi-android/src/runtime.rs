@@ -3,9 +3,11 @@
 use crate::{Error, Libraries};
 use anisette::{
     memory::Heap,
-    protocol::{Identifier, MAX_STATE_BYTES},
+    protocol::{
+        ADI_ERR_NOT_PROVISIONED, DSID, Identifier, MAX_STATE_BYTES, OP_GET_ROUTING, OP_SET_ROUTING,
+    },
 };
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt};
 use unicorn_engine::{
     RegisterARM64 as Reg, Unicorn,
     unicorn_const::{Arch, Mode, Prot},
@@ -107,6 +109,13 @@ pub struct Runtime {
     scratch: u64,
     poisoned: bool,
 }
+impl fmt::Debug for Runtime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Runtime")
+            .field("poisoned", &self.poisoned)
+            .finish_non_exhaustive()
+    }
+}
 impl Runtime {
     /// Creates an Android emulator with an identity and optional raw state.
     ///
@@ -131,23 +140,24 @@ impl Runtime {
             fault: None,
         };
         let mut cpu = Unicorn::new_with_data(Arch::ARM64, Mode::LITTLE_ENDIAN, env)?;
-        for (address, size) in [
-            (HEAP, HEAP_SIZE),
-            (SCRATCH, SCRATCH_SIZE),
-            (RETURN, 4096),
-            (STACK, STACK_SIZE),
+        for (address, size, prot) in [
+            (HEAP, HEAP_SIZE, Prot::READ | Prot::WRITE),
+            (SCRATCH, SCRATCH_SIZE, Prot::READ | Prot::WRITE),
+            (RETURN, 4096, Prot::READ | Prot::EXEC),
+            (STACK, STACK_SIZE, Prot::READ | Prot::WRITE),
         ] {
-            cpu.mem_map(address, size, Prot::ALL)?;
+            cpu.mem_map(address, size, prot)?;
         }
         for (index, image) in libraries.images.iter().enumerate() {
             let base = BASES[index];
             let imports = IMPORT + index as u64 * 0x1000000;
             cpu.mem_map(base, image.size, Prot::ALL)?;
-            cpu.mem_map(imports, IMPORT_SIZE, Prot::ALL)?;
+            cpu.mem_map(imports, IMPORT_SIZE, Prot::READ | Prot::WRITE)?;
             cpu.mem_write(
                 imports,
                 &[0xc0, 0x03, 0x5f, 0xd6].repeat(IMPORT_SIZE as usize / 4),
             )?;
+            cpu.mem_protect(imports, IMPORT_SIZE, Prot::READ | Prot::EXEC)?;
             for (offset, range) in &image.segments {
                 cpu.mem_write(base + offset, &image.bytes[range.clone()])?;
             }
@@ -265,9 +275,8 @@ impl Runtime {
         Ok(ptr)
     }
     fn output(&mut self, pointer: u64, length: u64) -> Result<(u64, Vec<u8>), Error> {
-        let ptr = u64::from_le_bytes(self.cpu.mem_read_as_vec(pointer, 8)?.try_into().unwrap());
-        let len =
-            u32::from_le_bytes(self.cpu.mem_read_as_vec(length, 4)?.try_into().unwrap()) as usize;
+        let ptr = read_u64_le(&self.cpu, pointer)?;
+        let len = read_u32_le(&self.cpu, length)? as usize;
         if ptr == 0 || len == 0 || len > MAX_STATE_BYTES {
             return Err("invalid ADI output size".into());
         }
@@ -278,9 +287,9 @@ impl Runtime {
     /// # Errors
     /// Returns an error if ADI reports an unexpected status or emulation fails.
     pub fn is_machine_provisioned(&mut self) -> Result<bool, Error> {
-        match self.call("aslgmuibau", &[(-2i64) as u64])? {
+        match self.call("aslgmuibau", &[DSID as u64])? {
             0 => Ok(true),
-            -45061 => Ok(false),
+            ADI_ERR_NOT_PROVISIONED => Ok(false),
             n => Err(Error::Adi(n)),
         }
     }
@@ -299,16 +308,9 @@ impl Runtime {
         let input = self.data(spim)?;
         self.must(
             "rsegvyrt87",
-            &[
-                (-2i64) as u64,
-                input,
-                spim.len() as u64,
-                cpim,
-                length,
-                session,
-            ],
+            &[DSID as u64, input, spim.len() as u64, cpim, length, session],
         )?;
-        let handle = u32::from_le_bytes(self.cpu.mem_read_as_vec(session, 4)?.try_into().unwrap());
+        let handle = read_u32_le(&self.cpu, session)?;
         let result = (|| {
             let (ptr, bytes) = self.output(cpim, length)?;
             self.must("jk24uiwqrg", &[ptr])?;
@@ -357,7 +359,7 @@ impl Runtime {
         let ml = self.data(&[0; 4])?;
         let otp = self.data(&[0; 8])?;
         let ol = self.data(&[0; 4])?;
-        self.must("qi864985u0", &[(-2i64) as u64, mid, ml, otp, ol])?;
+        self.must("qi864985u0", &[DSID as u64, mid, ml, otp, ol])?;
         let (mp, m) = self.output(mid, ml)?;
         let (op, o) = self.output(otp, ol)?;
         self.must("jk24uiwqrg", &[mp])?;
@@ -403,7 +405,7 @@ impl Runtime {
         if rc != 0 {
             return Err(Error::Adi(rc));
         }
-        let status = i32::from_be_bytes(self.cpu.mem_read_as_vec(buffer, 4)?.try_into().unwrap());
+        let status = read_i32_be(&self.cpu, buffer)?;
         if status != 0 {
             return Err(Error::Adi(status));
         }
@@ -416,12 +418,10 @@ impl Runtime {
     pub fn routing(&mut self) -> Result<u64, Error> {
         self.scratch = SCRATCH;
         let output = self.data(&[0; 8])?;
-        let mut body = (-2i64).to_be_bytes().to_vec();
+        let mut body = DSID.to_be_bytes().to_vec();
         body.extend(output.to_be_bytes());
-        self.dispatch(0x85fe63b0, &body)?;
-        Ok(u64::from_le_bytes(
-            self.cpu.mem_read_as_vec(output, 8)?.try_into().unwrap(),
-        ))
+        self.dispatch(OP_GET_ROUTING, &body)?;
+        read_u64_le(&self.cpu, output)
     }
     /// Stores a nonzero routing value in the native backend.
     ///
@@ -432,22 +432,44 @@ impl Runtime {
             return Err("routing must not be zero".into());
         }
         self.scratch = SCRATCH;
-        let mut body = (-2i64).to_be_bytes().to_vec();
+        let mut body = DSID.to_be_bytes().to_vec();
         body.extend(routing.to_be_bytes());
-        self.dispatch(0x632b8d6e, &body)
+        self.dispatch(OP_SET_ROUTING, &body)
     }
+}
+fn read_u32_le(cpu: &Cpu<'_>, address: u64) -> Result<u32, Error> {
+    let mut bytes = [0u8; 4];
+    cpu.mem_read(address, &mut bytes)?;
+    Ok(u32::from_le_bytes(bytes))
+}
+fn read_i32_be(cpu: &Cpu<'_>, address: u64) -> Result<i32, Error> {
+    let mut bytes = [0u8; 4];
+    cpu.mem_read(address, &mut bytes)?;
+    Ok(i32::from_be_bytes(bytes))
+}
+fn read_u64_le(cpu: &Cpu<'_>, address: u64) -> Result<u64, Error> {
+    let mut bytes = [0u8; 8];
+    cpu.mem_read(address, &mut bytes)?;
+    Ok(u64::from_le_bytes(bytes))
 }
 fn arg(cpu: &Cpu<'_>, i: usize) -> Result<u64, Error> {
     Ok(cpu.reg_read(REGS[i])?)
 }
 fn text(cpu: &Cpu<'_>, ptr: u64) -> Result<String, Error> {
-    let mut bytes = vec![];
-    for offset in 0..4096 {
-        let b = cpu.mem_read_as_vec(ptr.checked_add(offset).ok_or("string overflow")?, 1)?[0];
-        if b == 0 {
+    let mut bytes = Vec::new();
+    while bytes.len() < 4096 {
+        let addr = ptr
+            .checked_add(bytes.len() as u64)
+            .ok_or("string overflow")?;
+        let chunk_len = 64usize
+            .min(4096 - ((addr as usize) & 0xfff))
+            .min(4096 - bytes.len());
+        let chunk = cpu.mem_read_as_vec(addr, chunk_len)?;
+        if let Some(pos) = chunk.iter().position(|&b| b == 0) {
+            bytes.extend_from_slice(&chunk[..pos]);
             return String::from_utf8(bytes).map_err(|_| "invalid guest string".into());
         }
-        bytes.push(b);
+        bytes.extend_from_slice(&chunk);
     }
     Err("unterminated guest string".into())
 }
@@ -619,7 +641,10 @@ fn import(cpu: &mut Cpu<'_>, name: &str) -> Result<u64, Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        Arch, BTreeMap, Env, Error, HEAP, HEAP_SIZE, Heap, MAX_STATE_BYTES, Mode, Prot, Runtime,
+        SCRATCH, StateFile, Unicorn,
+    };
     #[test]
     fn virtual_state_enforces_handles_offsets_and_size() {
         let mut file = StateFile::default();

@@ -2,12 +2,13 @@
 mod filesystem;
 mod pe;
 mod runtime;
+use anisette::protocol::verify_sha256;
 pub use runtime::Runtime;
-use sha2::{Digest, Sha256};
 use std::{fs::File, io::Read, path::Path};
 
 pub const BINARY_SHA256: &str = "1a75abd4891fab507a6fae3ab112f42a43da0c45b9e0fec7cbef45b946c7dcae";
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     Invalid(&'static str),
     Io(std::io::Error),
@@ -40,11 +41,17 @@ impl From<&'static str> for Error {
         Self::Invalid(s)
     }
 }
+impl From<anisette::memory::MemoryError> for Error {
+    fn from(e: anisette::memory::MemoryError) -> Self {
+        Self::Invalid(e.as_str())
+    }
+}
 impl From<unicorn_engine::unicorn_const::uc_error> for Error {
     fn from(e: unicorn_engine::unicorn_const::uc_error) -> Self {
         Self::Unicorn(e)
     }
 }
+#[derive(Debug)]
 pub struct Binary {
     image: pe::Image,
 }
@@ -65,13 +72,7 @@ impl Binary {
         Self::verify(bytes)
     }
     fn verify(bytes: Vec<u8>) -> Result<Self, Error> {
-        if bytes.len() > 32 * 1024 * 1024
-            || Sha256::digest(&bytes)
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
-                != BINARY_SHA256
-        {
+        if bytes.len() > 32 * 1024 * 1024 || !verify_sha256(&bytes, BINARY_SHA256) {
             return Err("unrecognized Windows binary".into());
         }
         Ok(Self {
@@ -84,7 +85,7 @@ impl Binary {
 }
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Binary, Error};
     #[test]
     fn errors_preserve_causes_and_diagnostics() {
         use std::error::Error as _;

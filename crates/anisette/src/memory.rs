@@ -1,7 +1,39 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Allocation strategy adapted from os-findmy-e macOS-ADI-emulator/harness.py.
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MemoryError {
+    InvalidRange,
+    InvalidAlignment,
+    Overflow,
+    Exhausted,
+    InvalidRelease,
+}
+
+impl MemoryError {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidRange => "invalid heap range",
+            Self::InvalidAlignment => "invalid allocation alignment",
+            Self::Overflow => "allocation overflow",
+            Self::Exhausted => "emulated heap exhausted",
+            Self::InvalidRelease => "invalid heap release",
+        }
+    }
+}
+
+impl fmt::Display for MemoryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::error::Error for MemoryError {}
+
+#[derive(Debug)]
 pub struct Heap {
     free: BTreeMap<u64, u64>,
     used: BTreeMap<u64, u64>,
@@ -11,9 +43,9 @@ impl Heap {
     ///
     /// # Errors
     /// Returns an error if the start is zero, the size is zero, or the range overflows `u64`.
-    pub fn new(start: u64, size: u64) -> Result<Self, &'static str> {
+    pub fn new(start: u64, size: u64) -> Result<Self, MemoryError> {
         if start == 0 || size == 0 || start.checked_add(size).is_none() {
-            return Err("invalid heap range");
+            return Err(MemoryError::InvalidRange);
         }
         Ok(Self {
             free: BTreeMap::from([(start, size)]),
@@ -24,14 +56,14 @@ impl Heap {
     ///
     /// # Errors
     /// Returns an error for invalid alignment, size overflow, or insufficient free space.
-    pub fn allocate(&mut self, size: u64, alignment: u64) -> Result<u64, &'static str> {
+    pub fn allocate(&mut self, size: u64, alignment: u64) -> Result<u64, MemoryError> {
         if !alignment.is_power_of_two() {
-            return Err("invalid allocation alignment");
+            return Err(MemoryError::InvalidAlignment);
         }
         let size = size
             .max(32)
             .checked_add(alignment - 1)
-            .ok_or("allocation overflow")?
+            .ok_or(MemoryError::Overflow)?
             & !(alignment - 1);
         let chosen = self
             .free
@@ -41,7 +73,7 @@ impl Heap {
                 let end = address.checked_add(size)?;
                 (end <= start.checked_add(len)?).then_some((start, len, address, end))
             })
-            .ok_or("emulated heap exhausted")?;
+            .ok_or(MemoryError::Exhausted)?;
         let (start, len, address, end) = chosen;
         self.free.remove(&start);
         if address > start {
@@ -57,11 +89,14 @@ impl Heap {
     ///
     /// # Errors
     /// Returns an error if a nonzero address is not the start of a live allocation.
-    pub fn release(&mut self, address: u64) -> Result<(), &'static str> {
+    pub fn release(&mut self, address: u64) -> Result<(), MemoryError> {
         if address == 0 {
             return Ok(());
         }
-        let mut len = self.used.remove(&address).ok_or("invalid heap release")?;
+        let mut len = self
+            .used
+            .remove(&address)
+            .ok_or(MemoryError::InvalidRelease)?;
         let mut start = address;
         if let Some((&a, &n)) = self.free.range(..address).next_back()
             && a + n == address
@@ -81,7 +116,7 @@ impl Heap {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::Heap;
     #[test]
     fn rejects_null_empty_and_overflowing_ranges() {
         for (start, size) in [(0, 32), (1, 0), (u64::MAX, 1)] {

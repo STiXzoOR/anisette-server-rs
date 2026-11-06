@@ -1,8 +1,8 @@
 //! Pinned Apple Music ARM64 libraries executed in a bounded Unicorn instance.
 mod elf;
 mod runtime;
+use anisette::protocol::verify_sha256;
 pub use runtime::Runtime;
-use sha2::{Digest, Sha256};
 use std::{fs::File, io::Read, path::Path};
 
 pub const FILES: [(&str, &str); 2] = [
@@ -17,6 +17,7 @@ pub const FILES: [(&str, &str); 2] = [
 ];
 const MAX_BINARY: u64 = 32 * 1024 * 1024;
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     Invalid(&'static str),
     Io(std::io::Error),
@@ -49,11 +50,17 @@ impl From<&'static str> for Error {
         Self::Invalid(s)
     }
 }
+impl From<anisette::memory::MemoryError> for Error {
+    fn from(e: anisette::memory::MemoryError) -> Self {
+        Self::Invalid(e.as_str())
+    }
+}
 impl From<unicorn_engine::unicorn_const::uc_error> for Error {
     fn from(e: unicorn_engine::unicorn_const::uc_error) -> Self {
         Self::Unicorn(e)
     }
 }
+#[derive(Debug)]
 pub struct Libraries {
     images: [elf::Image; 2],
 }
@@ -83,11 +90,7 @@ impl Libraries {
         if bytes.len() as u64 > MAX_BINARY {
             return Err("library too large".into());
         }
-        let hash = Sha256::digest(&bytes)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>();
-        if hash != expected {
+        if !verify_sha256(&bytes, expected) {
             return Err("unrecognized Android library hash".into());
         }
         elf::Image::parse(bytes)
@@ -95,7 +98,7 @@ impl Libraries {
 }
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Error, FILES, Libraries};
     #[test]
     fn errors_preserve_causes_and_diagnostics() {
         use std::error::Error as _;
