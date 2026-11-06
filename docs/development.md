@@ -65,7 +65,7 @@ ANISETTE_WINDOWS_BINARY=./assets/local/CoreADI.dll \
 
 ## CI and container publishing
 
-GitHub Actions (`.github/workflows/ci.yml`) runs formatting, Clippy, offline unit/integration tests, and rustdoc checks. On pushes to `main` and version tags (`v*`), native `linux/amd64` and `linux/arm64` runners build the Docker image using `cargo-chef`, run `--check` across all three backends with `--network none`, and publish the multi-arch manifest to `ghcr.io/fdkevin0/anisette-server-rs`.
+GitHub Actions (`.github/workflows/ci.yml`) runs formatting, Clippy, offline unit/integration tests, and rustdoc checks. On pushes to `main` and version tags (`v*`), native `linux/amd64` and `linux/arm64` runners build the Docker image (which verifies `--check` across all three backends during build), push per-architecture digests, and publish the multi-arch manifest to `ghcr.io/fdkevin0/anisette-server-rs`.
 
 ## Workspace layout
 

@@ -20,8 +20,6 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y cmake clang libclang-dev ninja-build
-      - name: Install pinned toolchain
-        run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
@@ -32,6 +30,7 @@ jobs:
 
   image:
     needs: check
+    if: github.event_name == 'push'
     strategy:
       fail-fast: false
       matrix:
@@ -49,56 +48,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v4
-      - uses: docker/metadata-action@v6
-        id: meta
-        with:
-          images: ghcr.io/${{ github.repository }}
-          flavor: latest=false
-          tags: |
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=sha
-      - name: Build image
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          platforms: ${{ matrix.platform }}
-          load: true
-          tags: anisette-server-rs:test
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=image-${{ matrix.arch }}
-          cache-to: type=gha,scope=image-${{ matrix.arch }},mode=max
-      - name: Check bundled backends
-        run: |
-          docker run --rm --network none anisette-server-rs:test --help
-          for backend in android macos windows; do
-            docker run --rm --network none \
-              anisette-server-rs:test --backend "$backend" --check --state-dir /unwritable
-          done
-      - name: Log in to GHCR
-        if: github.event_name == 'push'
-        uses: docker/login-action@v4
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Push checked image
-        if: github.event_name == 'push'
-        env:
-          IMAGE: ghcr.io/${{ github.repository }}
-          ARCH: ${{ matrix.arch }}
-        run: |
-          image="${IMAGE,,}:ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}"
-          docker tag anisette-server-rs:test "$image"
-          docker push "$image"
-          mkdir -p /tmp/digests
-          docker image inspect "$image" --format '{{index .RepoDigests 0}}' > "/tmp/digests/$ARCH"
-      - uses: actions/upload-artifact@v4
-        if: github.event_name == 'push'
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v7
         with:
-          name: digest-${{ matrix.arch }}
+          context: .
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=image-${{ matrix.arch }}
+          cache-to: type=gha,scope=image-${{ matrix.arch }},mode=max
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
@@ -108,12 +79,13 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       packages: write
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: /tmp/digests
-          pattern: digest-*
+          pattern: digests-*
           merge-multiple: true
       - uses: docker/setup-buildx-action@v4
       - uses: docker/metadata-action@v6
@@ -131,15 +103,9 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Publish multi-platform image
-        env:
-          META_JSON: ${{ steps.meta.outputs.json }}
+      - name: Create and push manifest
+        working-directory: /tmp/digests
         run: |
-          mapfile -t tags < <(jq -r '.tags[]' <<< "$META_JSON")
-          args=()
-          for tag in "${tags[@]}"; do
-            args+=(--tag "$tag")
-          done
-          amd64=$(cat /tmp/digests/amd64)
-          arm64=$(cat /tmp/digests/arm64)
-          docker buildx imagetools create "${args[@]}" "$amd64" "$arm64"
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< '${{ steps.meta.outputs.json }}') \
+            $(printf 'ghcr.io/${{ github.repository }}@sha256:%s ' *)

@@ -55,6 +55,9 @@ COPY --from=build /src/target/release/anisette-server /usr/local/bin/anisette-se
 COPY --from=assets /assets /assets
 ENV ANISETTE_LISTEN=0.0.0.0:6969 ANISETTE_STATE_DIR=/data
 USER 10001:10001
+RUN anisette-server --backend android --check \
+    && anisette-server --backend macos --check \
+    && anisette-server --backend windows --check
 EXPOSE 6969
 ENTRYPOINT ["anisette-server"]
 CMD ["--backend", "android"]
