@@ -38,6 +38,19 @@ impl Backend {
         }
     }
 
+    /// Routing applied when a standard V3 client finishes provisioning without the
+    /// `X-Apple-I-MD-RINFO` extension. Standard clients (AltStore, SideStore, omnisette)
+    /// only forward `ptm` and `tk`, so without a fallback they cannot use this backend.
+    /// macOS has no verified value and still requires the extension.
+    pub const fn standard_v3_routing(self) -> Option<u64> {
+        match self {
+            Self::Android => Some(ANDROID_V3_ROUTING),
+            // Value Apple returns in `midFinishProvisioning` for Windows-profile provisioning.
+            Self::Windows => Some(WINDOWS_V3_ROUTING),
+            Self::Macos => None,
+        }
+    }
+
     pub fn default_binary_path(self) -> &'static Path {
         Path::new(match self {
             Self::Android => "/assets",
@@ -53,8 +66,14 @@ impl Backend {
                 user_agent: adi_macos::provisioning::USER_AGENT,
             },
             // Android uses the Windows HTTP profile; its ADI binary remains Android.
-            Self::Android | Self::Windows => ClientInfo {
+            Self::Android => ClientInfo {
                 client_info: "<PC> <Windows;6.2(0,0);9200> <com.apple.AuthKit/1 (com.apple.akd/1.0)>",
+                user_agent: "akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0",
+            },
+            // Windows CoreADI is iTunes' ADI. GSA answers an `akd` client name with an HTML
+            // 403 for this anisette, but accepts the iTunes AuthKit client.
+            Self::Windows => ClientInfo {
+                client_info: WINDOWS_CLIENT_INFO,
                 user_agent: "akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0",
             },
         }
@@ -358,9 +377,11 @@ impl ProvisioningContext for Context {
         // Native completion may populate routing; inspect it only after consuming the handle.
         let routing = match routing {
             Some(r) => r,
-            // Standard V3 omits Apple routing; preserve Dadoum's Android fallback when unset.
-            None if matches!(self.runtime, Device::Android(_)) => ANDROID_V3_ROUTING,
-            None => self.runtime.routing()?,
+            // Standard V3 omits Apple routing; use the backend's fallback when it has one.
+            None => match self.runtime.backend().standard_v3_routing() {
+                Some(r) => r,
+                None => self.runtime.routing()?,
+            },
         };
         if routing == 0 {
             return Err("this backend requires Apple routing extension".into());
@@ -381,6 +402,9 @@ impl Drop for Context {
 }
 
 const ANDROID_V3_ROUTING: u64 = 17106176;
+const WINDOWS_V3_ROUTING: u64 = 84215040;
+const WINDOWS_CLIENT_INFO: &str =
+    "<PC> <Windows;6.2(0,0);9200> <com.apple.AuthKit/1 (com.apple.iTunes/12.12.4.1)>";
 
 #[derive(Debug)]
 pub enum Assets {
@@ -410,6 +434,13 @@ enum Device {
     Windows(adi_windows::Runtime),
 }
 impl Device {
+    const fn backend(&self) -> Backend {
+        match self {
+            Self::Macos(_) => Backend::Macos,
+            Self::Android(_) => Backend::Android,
+            Self::Windows(_) => Backend::Windows,
+        }
+    }
     fn new(assets: &Assets, id: [u8; 16]) -> provisioning::Result<Self> {
         Ok(match assets {
             Assets::Windows(b) => {
@@ -532,6 +563,30 @@ mod tests {
     };
 
     #[test]
+    fn standard_v3_routing_falls_back_for_android_and_windows_only() {
+        assert_eq!(Backend::Android.standard_v3_routing(), Some(17106176));
+        assert_eq!(Backend::Windows.standard_v3_routing(), Some(84215040));
+        assert_eq!(Backend::Macos.standard_v3_routing(), None);
+    }
+
+    #[test]
+    fn windows_profile_claims_itunes_while_android_keeps_akd() {
+        let windows = Backend::Windows.profile();
+        assert!(windows.client_info.starts_with("<PC> <Windows;"));
+        assert!(
+            windows
+                .client_info
+                .ends_with("(com.apple.iTunes/12.12.4.1)>")
+        );
+        assert!(
+            Backend::Android
+                .profile()
+                .client_info
+                .ends_with("(com.apple.akd/1.0)>")
+        );
+    }
+
+    #[test]
     fn v1_state_dir_preserves_root_for_default_and_isolates_other_backends() {
         let root = tempfile::tempdir().unwrap();
         let state = root.path();
@@ -560,24 +615,39 @@ mod tests {
     fn live_missing_routing_checks_completed_native_state() {
         let mac = std::env::var_os("ANISETTE_MACOS_BINARY").unwrap();
         let win = std::env::var_os("ANISETTE_WINDOWS_BINARY").unwrap();
-        for assets in [
-            Assets::Macos(adi_macos::Binary::open(Path::new(&mac)).unwrap()),
-            Assets::Windows(adi_windows::Binary::open(Path::new(&win)).unwrap()),
-        ] {
-            let mut id = [0; 16];
-            getrandom::fill(&mut id).unwrap();
-            let mut context = Context::new(&assets, Identifier::from_bytes(id)).unwrap();
-            let (exchange, spim) = provisioning::Exchange::start(id, assets.profile()).unwrap();
-            let cpim = context.start(&spim).unwrap();
-            let finish = exchange.finish(&cpim).unwrap();
-            assert!(context.finish(&finish.ptm, &finish.tk, None).is_err());
-            assert!(context.pending.is_none());
-            assert!(context.runtime.is_machine_provisioned().unwrap());
-            assert_eq!(context.runtime.routing().unwrap(), 0);
-            context.cancel();
-            context.runtime.set_routing(finish.routing).unwrap();
-            assert!(!context.runtime.request_otp().unwrap().1.is_empty());
-        }
+        // Windows: a standard V3 finish (no routing extension) now uses the fallback.
+        let assets = Assets::Windows(adi_windows::Binary::open(Path::new(&win)).unwrap());
+        let mut id = [0; 16];
+        getrandom::fill(&mut id).unwrap();
+        let mut context = Context::new(&assets, Identifier::from_bytes(id)).unwrap();
+        let (exchange, spim) = provisioning::Exchange::start(id, assets.profile()).unwrap();
+        let cpim = context.start(&spim).unwrap();
+        let finish = exchange.finish(&cpim).unwrap();
+        assert!(
+            !context
+                .finish(&finish.ptm, &finish.tk, None)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(context.pending.is_none());
+        assert_eq!(context.runtime.routing().unwrap(), 84215040);
+        assert_eq!(finish.routing, 84215040, "Apple's Windows routing changed");
+        assert!(!context.runtime.request_otp().unwrap().1.is_empty());
+        // macOS has no verified fallback and still requires the extension.
+        let assets = Assets::Macos(adi_macos::Binary::open(Path::new(&mac)).unwrap());
+        let mut id = [0; 16];
+        getrandom::fill(&mut id).unwrap();
+        let mut context = Context::new(&assets, Identifier::from_bytes(id)).unwrap();
+        let (exchange, spim) = provisioning::Exchange::start(id, assets.profile()).unwrap();
+        let cpim = context.start(&spim).unwrap();
+        let finish = exchange.finish(&cpim).unwrap();
+        assert!(context.finish(&finish.ptm, &finish.tk, None).is_err());
+        assert!(context.pending.is_none());
+        assert!(context.runtime.is_machine_provisioned().unwrap());
+        assert_eq!(context.runtime.routing().unwrap(), 0);
+        context.cancel();
+        context.runtime.set_routing(finish.routing).unwrap();
+        assert!(!context.runtime.request_otp().unwrap().1.is_empty());
     }
     #[test]
     #[ignore = "requires all three ANISETTE binary paths, Apple network and permitted Unicorn JIT"]

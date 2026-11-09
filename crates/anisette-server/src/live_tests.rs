@@ -114,6 +114,16 @@ fn live_windows_http_restart_and_extended_v3() {
     run_live(assets, true);
 }
 
+#[test]
+#[ignore = "requires ANISETTE_WINDOWS_BINARY, Apple network and permitted Unicorn JIT"]
+fn live_windows_http_restart_and_standard_v3() {
+    let path = std::env::var_os("ANISETTE_WINDOWS_BINARY").expect("set Windows binary explicitly");
+    let assets = Arc::new(backend::Assets::Windows(
+        adi_windows::Binary::open(std::path::Path::new(&path)).unwrap(),
+    ));
+    run_live(assets, false);
+}
+
 fn run_live(binary: Arc<backend::Assets>, routing_extension: bool) {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("device");
@@ -194,7 +204,7 @@ fn run_live(binary: Arc<backend::Assets>, routing_extension: bool) {
         assert_eq!(read(&mut ws)["result"], "InvalidIdentifier");
     }
 
-    // macOS/Windows use the extension; Android exercises standard ptm/tk and the default routing value.
+    // With the extension the client's routing is kept; standard ptm/tk uses the backend fallback.
     let mut id = [0; 16];
     getrandom::fill(&mut id).unwrap();
     let (exchange, spim) = Exchange::start(id, binary.profile()).unwrap();
@@ -234,7 +244,7 @@ fn run_live(binary: Arc<backend::Assets>, routing_extension: bool) {
             Some(if routing_extension {
                 finish.routing
             } else {
-                17106176
+                binary.backend().standard_v3_routing().unwrap()
             })
         );
     }

@@ -43,7 +43,7 @@ docker run --rm -p 127.0.0.1:6969:6969 \
   ghcr.io/fdkevin0/anisette-server-rs:latest --backend macos
 ```
 
-All three backends support V1 (`GET /`) directly. Non-default V1 backends are provisioned lazily on first request and store their state under `/data/<backend>/identity.json`. Standard unmodified V3 clients should use `android`; provisioning new macOS or Windows devices over V3 requires the `X-Apple-I-MD-RINFO` finish-provisioning field (see [Compatibility](docs/compatibility.md)).
+All three backends support V1 (`GET /`) directly. Non-default V1 backends are provisioned lazily on first request and store their state under `/data/<backend>/identity.json`. Standard unmodified V3 clients (AltStore, SideStore) can use `android` or `windows`; provisioning new macOS devices over V3 requires the `X-Apple-I-MD-RINFO` finish-provisioning field (see [Compatibility](docs/compatibility.md)).
 
 ## API endpoints
 
