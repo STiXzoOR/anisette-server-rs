@@ -47,7 +47,7 @@ ANISETTE_ANDROID_LIBS=./assets/local/android-4.9.6 \
 ANISETTE_MACOS_BINARY=./assets/local/CoreADI-26.x86_64 \
   cargo test -p anisette-server live_http_restart_v3_restore_and_extended_provisioning -- --ignored
 ANISETTE_WINDOWS_BINARY=./assets/local/CoreADI.dll \
-  cargo test -p anisette-server live_windows_http_restart_and_extended_v3 -- --ignored
+  cargo test -p anisette-server live_windows_http_restart_and_standard_v3 -- --ignored
 ```
 
 ### Offline binary load checks

@@ -55,5 +55,5 @@ server closes connection
 
 In addition to `ptm` and `tk`, the client's final provisioning message may include `"X-Apple-I-MD-RINFO"` as a positive `u64` integer or decimal string forwarded from Apple's finish-provisioning response:
 
-- **macOS and Windows**: Required because the pinned native binaries return `0` for routing after standard `ptm`/`tk` completion.
-- **Android**: Optional; defaults to `17106176` when omitted, or stores Apple's value when provided.
+- **macOS**: Required because the pinned native binary leaves routing at `0` after standard `ptm`/`tk` completion and has no verified static fallback.
+- **Android and Windows**: Optional; defaults to `17106176` (`android`) or `84215040` (`windows`) when omitted, or stores the client-supplied value when provided.

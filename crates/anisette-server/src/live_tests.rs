@@ -1,6 +1,6 @@
 //! Explicit device-only integration test; uses temporary identities and never prints secrets.
 use super::{Arc, backend, http, store};
-use anisette::provisioning::Exchange;
+use anisette::provisioning::{Exchange, FinishData};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use reqwest::blocking::Client;
 use serde_json::{Value, json};
@@ -91,7 +91,16 @@ fn live_http_restart_v3_restore_and_extended_provisioning() {
     let binary = Arc::new(backend::Assets::Macos(
         adi_macos::Binary::open(std::path::Path::new(&path)).unwrap(),
     ));
-    run_live(binary, true);
+    run_live(binary, |finish| {
+        (
+            json!({
+                "ptm": STANDARD.encode(&finish.ptm),
+                "tk": STANDARD.encode(&finish.tk),
+                "X-Apple-I-MD-RINFO": finish.routing.to_string(),
+            }),
+            finish.routing,
+        )
+    });
 }
 
 #[test]
@@ -101,17 +110,16 @@ fn live_android_http_restart_and_standard_v3() {
     let assets = Arc::new(backend::Assets::Android(
         adi_android::Libraries::open(std::path::Path::new(&path)).unwrap(),
     ));
-    run_live(assets, false);
-}
-
-#[test]
-#[ignore = "requires ANISETTE_WINDOWS_BINARY, Apple network and permitted Unicorn JIT"]
-fn live_windows_http_restart_and_extended_v3() {
-    let path = std::env::var_os("ANISETTE_WINDOWS_BINARY").expect("set Windows binary explicitly");
-    let assets = Arc::new(backend::Assets::Windows(
-        adi_windows::Binary::open(std::path::Path::new(&path)).unwrap(),
-    ));
-    run_live(assets, true);
+    run_live(assets, |finish| {
+        assert_eq!(finish.routing, 17106176, "Apple's Android routing changed");
+        (
+            json!({
+                "ptm": STANDARD.encode(&finish.ptm),
+                "tk": STANDARD.encode(&finish.tk),
+            }),
+            17106176,
+        )
+    });
 }
 
 #[test]
@@ -121,10 +129,19 @@ fn live_windows_http_restart_and_standard_v3() {
     let assets = Arc::new(backend::Assets::Windows(
         adi_windows::Binary::open(std::path::Path::new(&path)).unwrap(),
     ));
-    run_live(assets, false);
+    run_live(assets, |finish| {
+        assert_eq!(finish.routing, 84215040, "Apple's Windows routing changed");
+        (
+            json!({
+                "ptm": STANDARD.encode(&finish.ptm),
+                "tk": STANDARD.encode(&finish.tk),
+            }),
+            84215040,
+        )
+    });
 }
 
-fn run_live(binary: Arc<backend::Assets>, routing_extension: bool) {
+fn run_live(binary: Arc<backend::Assets>, build_end: impl FnOnce(&FinishData) -> (Value, u64)) {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("device");
     let client = Client::builder()
@@ -140,6 +157,7 @@ fn run_live(binary: Arc<backend::Assets>, routing_extension: bool) {
         .json()
         .unwrap();
     assert_eq!(profile["client_info"], binary.profile().client_info);
+    assert_eq!(profile["user_agent"], binary.profile().user_agent);
     let response = client.get(&server.url).send().unwrap();
     assert_eq!(response.status(), 200);
     assert_eq!(response.headers()["cache-control"], "no-store");
@@ -153,13 +171,20 @@ fn run_live(binary: Arc<backend::Assets>, routing_extension: bool) {
     assert_eq!(first["X-Apple-I-MD-M"], next["X-Apple-I-MD-M"]);
     assert_eq!(first["X-Mme-Device-Id"], next["X-Mme-Device-Id"]);
     drop(server);
+    let identity_path = directory.join("identity.json");
+    let mut legacy: Value =
+        serde_json::from_slice(&std::fs::read(&identity_path).unwrap()).unwrap();
+    legacy["headers"]["client_info"] = json!("<Legacy>");
+    legacy["headers"]["user_agent"] = json!("legacy/1.0");
+    std::fs::write(&identity_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
     let server = Server::start(binary.clone(), &directory);
     let restored: Value = client.get(&server.url).send().unwrap().json().unwrap();
     assert_eq!(first["X-Apple-I-MD-M"], restored["X-Apple-I-MD-M"]);
     assert_eq!(first["X-Mme-Device-Id"], restored["X-Mme-Device-Id"]);
+    assert_eq!(restored["X-MMe-Client-Info"], binary.profile().client_info);
+    assert_eq!(restored["User-Agent"], binary.profile().user_agent);
 
-    let record: Value =
-        serde_json::from_slice(&std::fs::read(directory.join("identity.json")).unwrap()).unwrap();
+    let record: Value = serde_json::from_slice(&std::fs::read(&identity_path).unwrap()).unwrap();
     let identifier: [u8; 16] = serde_json::from_value(record["identifier"].clone()).unwrap();
     let request = json!({"identifier":STANDARD.encode(identifier),"adi_pb":record["adi_pb"]});
     for _ in 0..2 {
@@ -204,7 +229,7 @@ fn run_live(binary: Arc<backend::Assets>, routing_extension: bool) {
         assert_eq!(read(&mut ws)["result"], "InvalidIdentifier");
     }
 
-    // With the extension the client's routing is kept; standard ptm/tk uses the backend fallback.
+    // Standard clients omit `X-Apple-I-MD-RINFO`; extended clients forward Apple's value.
     let mut id = [0; 16];
     getrandom::fill(&mut id).unwrap();
     let (exchange, spim) = Exchange::start(id, binary.profile()).unwrap();
@@ -218,11 +243,7 @@ fn run_live(binary: Arc<backend::Assets>, routing_extension: bool) {
     let finish = exchange
         .finish(&STANDARD.decode(start["cpim"].as_str().unwrap()).unwrap())
         .unwrap();
-    let mut end_message =
-        json!({"ptm":STANDARD.encode(finish.ptm),"tk":STANDARD.encode(finish.tk)});
-    if routing_extension {
-        end_message["X-Apple-I-MD-RINFO"] = json!(finish.routing.to_string());
-    }
+    let (end_message, expected_routing) = build_end(&finish);
     send(&mut ws, end_message);
     let end = read(&mut ws);
     assert_eq!(end["result"], "ProvisioningSuccess");
@@ -241,11 +262,7 @@ fn run_live(binary: Arc<backend::Assets>, routing_extension: bool) {
             response["X-Apple-I-MD-RINFO"]
                 .as_str()
                 .and_then(|s| s.parse::<u64>().ok()),
-            Some(if routing_extension {
-                finish.routing
-            } else {
-                binary.backend().standard_v3_routing().unwrap()
-            })
+            Some(expected_routing)
         );
     }
     drop(server);

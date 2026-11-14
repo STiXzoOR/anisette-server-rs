@@ -13,8 +13,8 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (exchange, spim) = Exchange::start(
         id,
         ClientInfo {
-            client_info: "<PC> <Windows;6.2(0,0);9200> <com.apple.AuthKit/1 (com.apple.akd/1.0)>",
-            user_agent: "akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0",
+            client_info: adi_windows::CLIENT_INFO,
+            user_agent: adi_windows::USER_AGENT,
         },
     )?;
     println!("Apple start response received");

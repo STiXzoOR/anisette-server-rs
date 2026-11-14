@@ -246,7 +246,7 @@ pub struct StartMessage {
 pub struct EndMessage {
     pub ptm: String,
     pub tk: String,
-    /// Explicit macOS/Windows extension; ordinary V3 clients do not send this field.
+    /// Optional Apple routing override (required on backends without a static V3 fallback, currently macOS); standard V3 clients omit this field.
     #[serde(default, rename = "X-Apple-I-MD-RINFO", deserialize_with = "routing")]
     pub routing: Option<u64>,
 }

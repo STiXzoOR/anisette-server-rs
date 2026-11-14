@@ -12,7 +12,7 @@ The table below records the upstream projects referenced or adapted in `anisette
 ## Guest binaries and HTTP profiles
 
 - **Guest binaries**: Expected sizes, versions, and SHA-256 digests are recorded in [assets/manifests](../assets/manifests/README.md). No Apple binaries are committed to Git; Docker builds fetch and verify them by SHA-256 at image build time.
-- **HTTP profiles**: The Windows client profile (`X-MMe-Client-Info` and `User-Agent`) used by the Android and Windows backends follows the header format in [alex-mextner/passwords-app (`53c74a89`)](https://github.com/alex-mextner/passwords-app/commit/53c74a89a3b64d8e02eab5cc8b297dd22f5634cd).
+- **HTTP profiles**: The `android` backend's `X-MMe-Client-Info` and `User-Agent` follow [alex-mextner/passwords-app (`53c74a89`)](https://github.com/alex-mextner/passwords-app/commit/53c74a89a3b64d8e02eab5cc8b297dd22f5634cd); the `windows` backend pairs the Windows iTunes `X-MMe-Client-Info` (`com.apple.iTunes/12.12.4.1`) with the Windows CFNetwork `User-Agent` (`akd/1.0 CFNetwork/808.1.4`), matching AltStore (`altstoreio/AltStore#1834`) and AltSign (`rileytestut/AltSign#61`).
 
 ## Platform and TLS references
 

@@ -11,7 +11,7 @@
   "guest_architecture": "x86_64",
   "binary_size": 1720672,
   "binary_sha256": "1a75abd4891fab507a6fae3ab112f42a43da0c45b9e0fec7cbef45b946c7dcae",
-  "verification": "macOS arm64: real device provisioning, OTP, two independent restores with five OTP calls each, V1/restart and V3 with Apple routing extension passed; no account acceptance or native Windows API differential validation",
+  "verification": "macOS arm64 / Linux x86_64: real device provisioning, OTP, two independent restores with five OTP calls each, HTTP V1/restart, standard V3 handshake (routing 84215040) and GSA SRP acceptance with iTunes client profile passed; native Windows API differential validation not performed",
   "msi_size": 174817280,
   "msi_sha256": "b28e7b53865c5dc7c3fd48d707ee5c95dc2f51dd2e696a023bbb7c50a449f6f3"
 }

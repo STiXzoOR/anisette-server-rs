@@ -1,4 +1,4 @@
-//! Fixed Windows CoreADI execution; V3 provisioning requires Apple routing.
+//! Pinned Windows CoreADI x64 PE execution on Unicorn.
 mod filesystem;
 mod pe;
 mod runtime;
@@ -7,6 +7,9 @@ pub use runtime::Runtime;
 use std::{fs::File, io::Read, path::Path};
 
 pub const BINARY_SHA256: &str = "1a75abd4891fab507a6fae3ab112f42a43da0c45b9e0fec7cbef45b946c7dcae";
+pub const CLIENT_INFO: &str =
+    "<PC> <Windows;6.2(0,0);9200> <com.apple.AuthKit/1 (com.apple.iTunes/12.12.4.1)>";
+pub const USER_AGENT: &str = "akd/1.0 CFNetwork/808.1.4";
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
